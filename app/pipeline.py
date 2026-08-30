@@ -261,24 +261,17 @@ SYSTEM_PROMPT = (
 )
 
 
-def llm_refine(text, title, api_key, model):
+def llm_refine(text, title, api_key, model=None):
+    """通义千问校对+梳理。model 为可选首选模型，失败自动回退 LLM_MODELS。"""
     if not api_key:
         return None
     user = f"视频标题：{title}\n\n==== 原始字幕文本 ====\n{text}\n\n请按上述要求校对并梳理。"
-    body = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user},
-        ],
-        "temperature": 0.3,
-    }
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    r = requests.post(DASHSCOPE_URL, headers=headers, json=body, timeout=180)
-    if r.status_code != 200:
-        raise RuntimeError(f"通义千问调用失败 {r.status_code}: {r.text[:300]}")
-    data = r.json()
-    return data["choices"][0]["message"]["content"].strip()
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user},
+    ]
+    # 任一模型额度耗尽/未开通/过期则自动跳下一个；全失败抛错由上层降级
+    return llm_with_fallback(api_key, messages, preferred=model)
 
 
 def detect_lang(text):
@@ -290,26 +283,45 @@ def detect_lang(text):
     return "en" if lat >= cjk else "zh"
 
 
-def _llm_json(user, system, api_key, model, max_tokens=2000):
-    """调用通义千问并以严格 JSON 返回（带兜底解析）。"""
-    body = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "temperature": 0.3,
-        "response_format": {"type": "json_object"},
-    }
+def _llm_request(api_key, model, messages, response_format=None, max_tokens=2000):
+    """单次调用通义千问 chat/completions，返回 content 字符串；非 200 抛错（供回退）。"""
+    body = {"model": model, "messages": messages, "temperature": 0.3}
+    if response_format:
+        body["response_format"] = response_format
+    else:
+        body["max_tokens"] = max_tokens
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     r = requests.post(DASHSCOPE_URL, headers=headers, json=body, timeout=180)
     if r.status_code != 200:
-        raise RuntimeError(f"通义千问调用失败 {r.status_code}: {r.text[:200]}")
-    content = r.json()["choices"][0]["message"]["content"]
+        raise RuntimeError(f"llm {model} {r.status_code}: {r.text[:300]}")
+    return r.json()["choices"][0]["message"]["content"].strip()
+
+
+def llm_with_fallback(api_key, messages, response_format=None, max_tokens=2000, preferred=None):
+    """遍历 LLM_MODELS（preferred 排最前），任一模型「额度耗尽/未开通/过期」自动跳下一个。
+
+    用于「AI 校验与梳理」步骤消耗文本模型额度；配合 .env 的 LLM_MODEL_PRIORITY
+    可把快到期的模型排前面优先消耗。"""
+    cands = list(LLM_MODELS)
+    if preferred:
+        cands = [preferred] + cands
+    cands = list(dict.fromkeys(cands))  # 去重保序
+    last_err = None
+    for m in cands:
+        try:
+            return _llm_request(api_key, m, messages, response_format=response_format, max_tokens=max_tokens)
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or RuntimeError("所有 LLM 模型均不可用")
+
+
+def _parse_json_or_none(content):
+    """容错解析 LLM 返回的 JSON（可能带 markdown 代码块或多余文本）。"""
     try:
         return json.loads(content)
     except Exception:
-        m = re.search(r"\{.*\}", content, re.S)
+        m = re.search(r"\{.*\}|\[.*\]", content, re.S)
         if m:
             try:
                 return json.loads(m.group(0))
@@ -318,7 +330,7 @@ def _llm_json(user, system, api_key, model, max_tokens=2000):
     return None
 
 
-def llm_tech_extract(text, title, api_key, model):
+def llm_tech_extract(text, title, api_key, model=None):
     """从字幕/转写中提炼：每一项技术的用途、是否支持国内使用、特别注意事项。
     返回 dict 或 None。"""
     if not api_key:
@@ -335,7 +347,13 @@ def llm_tech_extract(text, title, api_key, model):
         "只返回 JSON，不要任何解释或 markdown 代码块。"
     )
     user = f"视频标题：{title}\n\n==== 字幕/转写文本 ====\n{text}\n\n请按上述格式提取。"
-    return _llm_json(user, system, api_key, model, max_tokens=3000)
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    content = llm_with_fallback(api_key, messages, response_format={"type": "json_object"},
+                                max_tokens=3000, preferred=model)
+    return _parse_json_or_none(content)
 
 
 def llm_bilingual(text, title, api_key, model, src_lang):
@@ -351,7 +369,13 @@ def llm_bilingual(text, title, api_key, model, src_lang):
         "只返回 JSON 数组，不要任何解释或 markdown 代码块。"
     )
     user = f"视频标题：{title}\n\n==== {srclbl}字幕 ====\n{text}\n\n请分段并翻译为{tgt}。"
-    obj = _llm_json(user, system, api_key, model, max_tokens=4000)
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    content = llm_with_fallback(api_key, messages, response_format={"type": "json_object"},
+                                max_tokens=4000, preferred=model)
+    obj = _parse_json_or_none(content)
     if isinstance(obj, list):
         return obj
     if isinstance(obj, dict):
@@ -434,6 +458,22 @@ if _priority_env:
     _pri = [m.strip() for m in _priority_env.split(",") if m.strip()]
     if _pri:
         REALTIME_ASR_MODELS = _pri
+
+# ---------------------------------------------------------------------------
+# AI 校验/梳理 用的「文本大模型」列表（与 ASR 语音模型分离）
+# qwen-plus 系列用于「字幕智能梳理」步骤，消耗文本模型额度。
+# 快到期优先：把将要过期的模型写在前面；也可经 .env 的 LLM_MODEL_PRIORITY 覆盖。
+# 运行时任一模型额度耗尽/未开通/过期，llm_with_fallback 会自动跳到下一个。
+LLM_MODELS = [
+    "qwen3.5-plus",   # 快到期优先
+    "qwen3.6-plus",
+    "qwen3.7-plus",
+]
+_llm_priority_env = os.environ.get("LLM_MODEL_PRIORITY", "").strip()
+if _llm_priority_env:
+    _lp = [m.strip() for m in _llm_priority_env.split(",") if m.strip()]
+    if _lp:
+        LLM_MODELS = _lp
 
 
 class _AsrModelUnavailable(Exception):
