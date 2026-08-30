@@ -1,0 +1,35 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # 任务状态 TTL 较短（默认 86400s），不需要持久化到磁盘。
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # 服务端统一提供 ASR/LLM 的 DashScope Key（客户端可不填）
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-}
+      # 任务状态走 Redis（多副本共享、自愈并发计数）
+      - REDIS_URL=redis://redis:6379/0
+      # 单 IP 每小时最多提交次数（防刷爆账单）
+      - IP_LIMIT_PER_HOUR=20
+      # 全服务并行任务数上限（超过返回 429）
+      - GLOBAL_CONCURRENCY=4
+      # 音频处理长度上限（秒），超长裁剪；也用于上传校验提示
+      - MAX_AUDIO_SEC=7200
+    depends_on:
+      redis:
+        condition: service_healthy
+    # 本地挂载便于改代码不重建镜像；生产镜像可去掉。
+    volumes:
+      - ./app:/app/app
+      - ./static:/app/static

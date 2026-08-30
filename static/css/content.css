@@ -1,0 +1,157 @@
+/* ==========================================================================
+   content.css —— 内容展示样式
+   梳理结果(.md) / 原始字幕(.rawseg) / 中英文对照(.biling) / 技术提取(.techcard)
+   / 整批查看(.ovsec) / 批量列表(.batchlist) / 批量勾选(.selpanel)
+   ========================================================================== */
+
+/* ---------- 梳理结果（Markdown 渲染区）---------- */
+.md{background:#0a0d1a;border:1px solid var(--line);border-radius:14px;padding:30px 34px;
+  line-height:2.0;font-size:15.5px;overflow:auto;max-height:80vh;max-width:880px;margin:0 auto;
+  text-wrap:pretty;word-break:break-word;box-shadow:inset 0 0 0 1px rgba(255,255,255,.02)}
+.md h1,.md h2,.md h3{color:#fff;margin:18px 0 10px;line-height:1.4}
+.md h2{border-left:3px solid var(--brand);padding:6px 0 6px 12px;border-radius:0 8px 8px 0;
+  background:linear-gradient(90deg,rgba(124,147,255,.12),transparent 75%);font-size:19px;margin-top:26px}
+.md h3{font-size:16px;color:#dfe6ff;padding-left:14px;position:relative}
+.md h3::before{content:"";position:absolute;left:0;top:6px;width:7px;height:7px;border-radius:2px;
+  background:var(--brand2);transform:rotate(45deg)}
+.md h4,.md h5,.md h6{color:var(--brand2);font-size:15px;margin:16px 0 8px;line-height:1.5}
+.md p{margin:14px 0;line-height:2.0}
+.md ul,.md ol{margin:12px 0;padding-left:24px}
+.md li{margin:9px 0;line-height:1.95}
+.md li::marker{color:var(--brand)}
+.md ol li::marker{color:var(--brand2);font-weight:700}
+.md li>ul,.md li>ol{margin:6px 0}
+/* 关键词高亮：让 AI 梳理里的重点一眼可见 */
+.md strong{color:#fff;font-weight:700;background:linear-gradient(90deg,rgba(124,147,255,.22),rgba(168,124,255,.18));
+  border-radius:5px;padding:1px 5px;box-decoration-break:clone;-webkit-box-decoration-break:clone}
+.md em{color:var(--brand2);font-style:normal}
+.md blockquote{border-left:3px solid var(--brand2);margin:14px 0;padding:10px 16px;color:var(--sub);
+  background:rgba(124,147,255,.07);border-radius:0 10px 10px 0}
+.md hr{border:0;border-top:1px solid var(--line);margin:20px 0}
+.md code{background:var(--card);padding:2px 7px;border-radius:6px;font-size:13px;color:#cfe0ff}
+.md pre{background:#070a14;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+  overflow:auto;font-size:13px;line-height:1.7}
+.md pre code{background:transparent;padding:0;color:#dce6ff}
+.md a{color:var(--brand2);text-decoration:underline;text-underline-offset:2px}
+.md table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px}
+.md th,.md td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top;line-height:1.7}
+.md th{background:var(--card);color:#fff;position:sticky;top:0;z-index:1}
+.md tbody tr:nth-child(even){background:rgba(255,255,255,.03)}
+.md>:first-child{margin-top:0}
+.md>:last-child{margin-bottom:0}
+
+/* ---------- 原始字幕（分段、带序号）---------- */
+.rawseg{display:grid;grid-template-columns:34px 1fr;gap:12px;padding:13px 2px;border-bottom:1px dashed var(--line);line-height:1.95}
+.rawseg:first-child{padding-top:2px}
+.rawseg:last-child{border-bottom:0}
+.rawseg .segn{flex:0 0 34px;color:var(--brand);font-weight:700;font-size:13px;text-align:right;font-variant-numeric:tabular-nums}
+.rawseg .segc{white-space:pre-wrap;word-break:break-word;text-wrap:pretty}
+.raw{white-space:pre-wrap;background:#0a0d1a;border:1px solid var(--line);border-radius:14px;padding:24px 28px;
+  font-size:14.5px;line-height:1.95;max-height:80vh;overflow:auto;color:var(--sub);max-width:860px;margin:0 auto;word-break:break-word}
+
+/* ---------- 中英文对照：逐段「配对卡片」布局（原文/译文左右成组）---------- */
+.biling{border:1px solid var(--line);border-radius:14px;overflow:hidden;max-height:80vh;overflow:auto;background:#0a0d1a}
+.biling-head{position:sticky;top:0;z-index:2;display:grid;grid-template-columns:1fr 1fr;
+  background:linear-gradient(90deg,var(--card),#141a30);border-bottom:1px solid var(--line)}
+.biling-head .bilhl{padding:12px 18px;font-weight:700;font-size:13px;color:var(--brand);letter-spacing:.3px}
+.biling-head .bilhl:last-child{color:var(--brand2);border-left:1px solid var(--line)}
+.biling-pair{display:grid;grid-template-columns:1fr 1fr;gap:0;border-bottom:1px solid var(--line)}
+.biling-pair:last-child{border-bottom:0}
+.bil-card{position:relative;padding:16px 18px 16px 44px;font-size:14.5px;line-height:1.95;vertical-align:top;
+  white-space:pre-wrap;word-break:break-word;text-wrap:pretty}
+.bil-card.bil-orig{color:var(--sub);border-right:1px solid var(--line);background:rgba(255,255,255,.012)}
+.bil-card.bil-trans{color:var(--txt)}
+.bil-card p{margin:0}
+.biln{position:absolute;top:15px;left:14px;min-width:20px;height:20px;line-height:20px;text-align:center;
+  border-radius:6px;background:rgba(124,147,255,.16);color:var(--brand);font-weight:700;font-size:11px;font-variant-numeric:tabular-nums}
+.bil-card.bil-trans .biln{background:rgba(168,124,255,.16);color:var(--brand2)}
+.biling-pair:hover .bil-card{background:rgba(124,147,255,.05)}
+.bil-card .muted{color:var(--sub);font-size:13px}
+
+/* ---------- 技术提取 ---------- */
+.techcard{background:#0a0d1a;border:1px solid var(--line);border-radius:14px;padding:28px 32px;max-height:80vh;overflow:auto;max-width:860px;margin:0 auto}
+.techsec{margin-bottom:22px;padding-bottom:18px;border-bottom:1px solid var(--line)}
+.techsec:last-child{margin-bottom:0;padding-bottom:0;border-bottom:0}
+.techsec h3{color:#fff;margin:0 0 14px;font-size:16px;border-left:3px solid var(--brand);padding-left:10px}
+.techsec ul{margin:0;padding-left:22px}
+.techsec li{margin:7px 0;line-height:1.7;color:var(--txt)}
+.techsec .muted{color:var(--sub);font-size:13px;margin:0}
+.dombox{border-radius:11px;padding:14px 16px;line-height:1.8;font-size:14px;border:1px solid var(--line);margin-top:6px}
+.dombox.bad-yes{background:rgba(62,224,143,.12);border-color:rgba(62,224,143,.35);color:#bdf3d6}
+.dombox.bad-no{background:rgba(255,122,122,.12);border-color:rgba(255,122,122,.35);color:#ffc2c2}
+.dombox.bad-unk{background:rgba(255,184,90,.12);border-color:rgba(255,184,90,.35);color:#ffe1b0}
+.techline{display:flex;gap:12px;margin:9px 0;line-height:1.8;font-size:14px;align-items:baseline}
+.techline .tlbl{flex:0 0 72px;color:var(--brand);font-weight:600;font-size:13px}
+.techline .note{color:var(--warn)}
+
+/* ---------- 整批查看（渲染到当前页，非弹窗）---------- */
+.ovcontainer{max-width:860px;margin:0 auto}
+.ovsec{border:1px solid var(--line);border-radius:14px;padding:18px 22px 20px;margin-bottom:14px;background:#0a0d1a;scroll-margin-top:64px}
+.ovsec h3{position:sticky;top:60px;margin:0 0 14px;font-size:16px;color:#fff;border-left:3px solid var(--brand);padding:8px 0 8px 11px;background:#0a0d1a;z-index:2}
+.ovsec .ovtag{font-size:12px;color:var(--sub);margin-left:8px;font-weight:400}
+.ovsec p{margin:12px 0;line-height:1.9}
+.ovsec ul,.ovsec ol{margin:12px 0;padding-left:24px}
+.ovsec li{margin:9px 0;line-height:1.9}
+.ovsec li::marker{color:var(--brand)}
+.ovsec strong{color:#fff;font-weight:700}
+.ovsec h1,.ovsec h2{color:#fff;margin:18px 0 10px}
+.ovsec h2{border-left:3px solid var(--brand);padding-left:10px}
+.ovsec blockquote{background:rgba(124,147,255,.06);border-radius:10px;padding:10px 16px;margin:12px 0}
+.ovsec table{border-collapse:collapse;width:100%;margin:12px 0;font-size:14px}
+.ovsec th,.ovsec td{border:1px solid var(--line);padding:8px 11px;vertical-align:top;line-height:1.7}
+.ovsec th{background:var(--card);color:#fff}
+.ovh{margin:0 0 14px;font-size:16px;color:#fff;border-left:3px solid var(--brand);padding:8px 0 8px 11px}
+.ovsub{white-space:pre-wrap;line-height:1.95;font-size:15px;color:var(--txt);background:#11162b;border:1px solid var(--line);border-radius:11px;padding:18px 22px;word-break:break-word;text-wrap:pretty}
+.ovtech{margin-top:14px}
+.ovtech .techsec h3{border-left:3px solid var(--brand2)}
+.ovunavail{color:var(--err);font-size:13px;line-height:1.6}
+
+/* ---------- 批量列表 ---------- */
+.batchlist{margin-top:14px;display:flex;flex-direction:column;gap:9px}
+.brow{display:grid;grid-template-columns:36px 1fr auto auto auto auto auto;gap:10px;align-items:center;
+  background:#0a0d1a;border:1px solid var(--line);border-radius:11px;padding:10px 13px;font-size:13px;transition:.16s}
+.brow:hover{border-color:rgba(124,147,255,.4)}
+.binfo{display:flex;flex-direction:column;gap:3px;min-width:0}
+.bfail{font-size:11px;color:var(--err);line-height:1.5}
+.bno{color:var(--brand);font-weight:700;text-align:center;font-size:14px}
+.btitle{color:var(--txt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bprog{color:var(--sub);min-width:42px;text-align:right}
+.viewlink{font-size:12px;text-decoration:none;color:var(--brand);background:rgba(124,147,255,.14);
+  border:1px solid rgba(124,147,255,.38);border-radius:8px;padding:5px 11px;cursor:pointer;transition:.16s}
+.viewlink[data-act="exp"]{color:#c4abff;background:rgba(168,124,255,.14);border-color:rgba(168,124,255,.38)}
+.viewlink[data-act="send"]{color:var(--ok);background:rgba(62,224,143,.12);border-color:rgba(62,224,143,.34)}
+.viewlink:hover{border-color:currentColor;filter:brightness(1.12)}
+.batchbar{display:flex;gap:10px;align-items:center;margin:6px 0 14px;flex-wrap:wrap;
+  background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.batchbar button{background:linear-gradient(92deg,var(--brand),var(--brand2));border:0;color:#fff;border-radius:10px;padding:10px 17px;font-size:13px;font-weight:600;cursor:pointer;transition:.16s}
+.batchbar button:hover{filter:brightness(1.07);transform:translateY(-1px)}
+.batchbar .ghost{background:var(--card);border:1px solid var(--line);color:var(--txt);font-weight:400}
+.batchbar .ghost:hover{border-color:var(--brand);transform:none}
+
+/* ---------- 批量勾选面板 ---------- */
+.ckrow{display:flex;align-items:center;gap:10px;margin:18px 0 4px;
+  background:var(--card);border:1px solid var(--line);border-radius:11px;padding:12px 14px}
+.ck{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--txt);cursor:pointer;user-select:none}
+.ck input{width:auto;accent-color:var(--brand)}
+.ckhint{font-size:12px;color:var(--sub);line-height:1.5}
+.selpanel{margin-top:14px;border:1px solid var(--line);border-radius:12px;padding:14px;
+  background:rgba(124,147,255,.05);display:none}
+.selhead{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+.selhead .explbl{font-size:13px;color:var(--sub)}
+.selhead button{flex:0 0 auto;background:var(--card);border:1px solid var(--line);color:var(--txt);
+  border-radius:9px;padding:7px 13px;font-size:12px;cursor:pointer;transition:.16s}
+.selhead button:hover{border-color:var(--brand);color:#fff}
+.sellist{max-height:260px;overflow:auto;display:flex;flex-direction:column;gap:7px}
+.selitem{display:grid;grid-template-columns:24px 52px 1fr auto;gap:10px;align-items:center;
+  background:#0a0d1a;border:1px solid var(--line);border-radius:10px;padding:9px 11px;font-size:13px;cursor:pointer;transition:.16s}
+.selitem:hover{border-color:rgba(124,147,255,.4)}
+.selitem input{width:auto;accent-color:var(--brand)}
+.seltitle{color:var(--txt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.seldur{color:var(--sub);font-size:12px}
+
+/* ---------- 历史记录（预留）---------- */
+.historyitem{display:flex;gap:10px;align-items:center;background:#0a0d1a;border:1px solid var(--line);border-radius:11px;padding:11px 14px;margin-bottom:9px;font-size:13px;transition:.16s}
+.historyitem:hover{border-color:rgba(124,147,255,.4)}
+.historyitem .ht{color:var(--txt);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.historyitem button{background:rgba(124,147,255,.14);border:1px solid rgba(124,147,255,.38);color:#aebcff;border-radius:9px;padding:6px 13px;font-size:12px;cursor:pointer;transition:.16s}
+.historyitem button:hover{border-color:var(--brand);color:#fff}

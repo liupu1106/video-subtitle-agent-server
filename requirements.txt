@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+redis>=4.5
+python-multipart
+yt-dlp
+requests
+openpyxl
+reportlab

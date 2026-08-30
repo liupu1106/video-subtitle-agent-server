@@ -1,0 +1,37 @@
+# ---- Secrets (NEVER commit) ----
+.env
+.env.local
+*.secret
+
+# ---- Python ----
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- OS / editor junk ----
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# ---- Logs & runtime temp ----
+*.log
+logs/
+outputs/
+uploads/
+tmp/
+temp/
+__pycache__/
+
+# ---- Local data (in-memory store resets on restart, not source) ----
+*.sqlite
+*.db
+data/
+media/

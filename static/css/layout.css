@@ -1,0 +1,53 @@
+/* ==========================================================================
+   layout.css —— 左侧导航栏 + 右侧内容区（多页面容器）
+   页面切换靠 .page.active，由 js/nav.js 控制。
+   ========================================================================== */
+.app{display:flex;min-height:100vh;align-items:flex-start}
+
+/* ---------- 左侧导航 ---------- */
+.sidebar{width:var(--sidebar-w);flex:0 0 var(--sidebar-w);position:sticky;top:0;height:100vh;
+  overflow:auto;padding:22px 14px;
+  background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,0)),var(--panel);
+  border-right:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:10px;padding:0 8px 16px;
+  border-bottom:1px solid var(--line);margin-bottom:14px}
+.brand .logo{font-size:22px;line-height:1}
+.brand .bt{font-size:15px;font-weight:700;color:#fff;line-height:1.35}
+.brand .bs{display:block;font-size:11px;color:var(--sub);font-weight:400}
+
+.navlist{display:flex;flex-direction:column;gap:4px}
+.navsec{font-size:11px;color:var(--sub);padding:14px 12px 6px;letter-spacing:.6px}
+.navitem{display:flex;align-items:center;gap:10px;width:100%;text-align:left;
+  background:transparent;border:1px solid transparent;color:var(--sub);
+  border-radius:11px;padding:11px 12px;font-size:14px;cursor:pointer;
+  font-family:inherit;transition:.16s}
+.navitem:hover{background:var(--card);color:var(--txt)}
+.navitem.active{color:#fff;font-weight:600;border-color:var(--brand);
+  background:linear-gradient(92deg,rgba(124,147,255,.22),rgba(168,124,255,.18))}
+.navitem .ni{font-size:16px;flex:0 0 22px;text-align:center;line-height:1}
+.navitem .ndot{margin-left:auto;font-size:11px;color:var(--brand);font-weight:700;
+  background:rgba(124,147,255,.18);border-radius:20px;padding:2px 8px}
+.sidefoot{margin-top:18px;padding:12px 10px;border-top:1px solid var(--line);
+  font-size:11px;color:var(--sub);line-height:1.75}
+
+/* ---------- 右侧内容 ---------- */
+.main{flex:1;min-width:0;padding:26px 30px 60px}
+.page{display:none;animation:fadeIn .18s ease}
+.page.active{display:block}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.pagehead{margin:0 0 18px}
+.pagehead h2{font-size:21px;margin:0 0 6px;color:#fff;font-weight:700}
+.pagehead p{margin:0;color:var(--sub);font-size:13px;line-height:1.65;max-width:760px}
+
+/* ---------- 窄屏：导航转为顶部横向 ---------- */
+@media(max-width:880px){
+  .app{flex-direction:column}
+  .sidebar{position:static;width:100%;flex:none;height:auto;overflow:visible;
+    border-right:0;border-bottom:1px solid var(--line);padding:14px}
+  .brand{padding-bottom:12px;margin-bottom:10px}
+  .navlist{flex-direction:row;flex-wrap:wrap;gap:6px}
+  .navitem{width:auto;padding:9px 13px}
+  .navsec{padding:10px 4px 2px;width:100%}
+  .sidefoot{display:none}
+  .main{padding:18px 16px 46px}
+}

@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
+<title>视频字幕提取与智能梳理</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<link rel="stylesheet" href="/static/css/base.css" />
+<link rel="stylesheet" href="/static/css/layout.css" />
+<link rel="stylesheet" href="/static/css/content.css" />
+</head>
+<body>
+<div class="app">
+
+  <!-- ===================== 左侧导航 ===================== -->
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="logo">🎬</span>
+      <div>
+        <span class="bt">视频字幕智能体</span>
+        <span class="bs">提取 · 转写 · 智能梳理</span>
+      </div>
+    </div>
+
+    <div class="navsec">工作流</div>
+    <div class="navlist">
+      <button class="navitem active" data-page="page-new">
+        <span class="ni">🚀</span>新建解析</button>
+      <button class="navitem" data-page="page-jobs">
+        <span class="ni">📊</span>任务进度<span class="ndot" id="navJobsDot" style="display:none">进行中</span></button>
+      <button class="navitem" data-page="page-result">
+        <span class="ni">📄</span>单视频结果</button>
+      <button class="navitem" data-page="page-batch">
+        <span class="ni">🗂</span>整批查看</button>
+    </div>
+
+    <div class="navsec">配置</div>
+    <div class="navlist">
+      <button class="navitem" data-page="page-settings">
+        <span class="ni">⚙️</span>模型与密钥</button>
+    </div>
+
+    <div class="sidefoot">
+      后端 FastAPI + yt-dlp<br/>DashScope 语音识别 + 通义千问
+    </div>
+  </aside>
+
+  <!-- ===================== 右侧内容 ===================== -->
+  <main class="main">
+    <div class="err" id="err"></div>
+
+    <!-- ---------- 页面：新建解析 ---------- -->
+    <section class="page active" id="page-new">
+      <div class="pagehead">
+        <h2>新建解析</h2>
+        <p>粘贴视频链接（支持 Bilibili、通用直链/网页内嵌视频）。有字幕则直接提取，无字幕自动语音转写，
+           再用通义千问校对并梳理成条理分明的排版。</p>
+      </div>
+
+      <div class="card">
+        <label for="url">视频链接</label>
+        <input id="url" placeholder="https://www.bilibili.com/video/BVxxxx 或 https://xxx.mp4" />
+
+        <div class="ckrow" style="margin-top:14px">
+          <label class="ck"><input type="checkbox" id="batch" disabled /> 整集批量解析（番剧整季 / 视频选集多P）</label>
+          <span class="ckhint" id="batchHint">粘贴番剧整季或视频选集（多P）链接后，此处自动可用，将逐集处理并可在下方逐集导出</span>
+        </div>
+
+        <div class="selpanel" id="selPanel">
+          <div class="selhead">
+            <span class="explbl" id="selInfo">已选 0 / 0</span>
+            <button id="selAll">全选</button>
+            <button id="selInv">反选</button>
+          </div>
+          <div class="sellist" id="sellist"></div>
+        </div>
+
+        <button class="btn" id="go">开始提取并梳理</button>
+        <div class="hint">密钥与模型请在左侧「⚙️ 模型与密钥」中配置。提交后会自动跳转到「任务进度」。</div>
+      </div>
+    </section>
+
+    <!-- ---------- 页面：任务进度 ---------- -->
+    <section class="page" id="page-jobs">
+      <div class="pagehead">
+        <h2>任务进度</h2>
+        <p>提交后可在此查看处理进度与日志；批量任务会列出每一集，可单独查看或导出。</p>
+      </div>
+
+      <div class="status card" id="status">
+        <div class="stage" id="stage">排队中…</div>
+        <div class="bar"><i id="bar"></i></div>
+        <div class="log" id="log"></div>
+        <div class="batchlist" id="batchList" style="display:none"></div>
+      </div>
+      <div class="hint" id="jobsEmpty">暂无进行中的任务 —— 请先到「🚀 新建解析」提交链接。</div>
+    </section>
+
+    <!-- ---------- 页面：单视频结果 ---------- -->
+    <section class="page" id="page-result">
+      <div class="pageempty" id="resultEmpty">📄 这里还没有内容
+        <span>请先到「📊 任务进度」中点击某个视频的「查看」</span></div>
+      <div class="result" id="result">
+        <button class="backbtn" id="backBatch">← 返回任务进度</button>
+        <div class="exptoolbar" id="allTools">
+          <span class="explbl">整视频一键操作：</span>
+          <button id="exportAll">⬇ 一键导出全部</button>
+          <span class="ckhint" id="allToolsHint">打包该视频全部可导出文件（原始字幕/梳理/技术/对照 × TXT/SRT/MD/Excel/PDF）</span>
+        </div>
+        <div class="meta" id="meta"></div>
+        <div class="tabs">
+          <button class="tab active" data-tab="raw">📝 原始字幕</button>
+          <button class="tab" data-tab="summary">📋 梳理结果</button>
+          <button class="tab" data-tab="tech">🔧 技术提取</button>
+          <button class="tab" data-tab="biling">🌐 中英文对照</button>
+        </div>
+
+        <div class="tabpane" id="pane-raw">
+          <div class="exptoolbar">
+            <button class="cp" data-sec="raw">复制</button>
+            <span class="explbl">导出【原始字幕】：</span>
+            <button data-sec="raw" data-f="txt">TXT</button>
+            <button data-sec="raw" data-f="srt">SRT</button>
+            <button data-sec="raw" data-f="xlsx">Excel</button>
+            <button data-sec="raw" data-f="pdf">PDF</button>
+          </div>
+          <div class="raw" id="raw"></div>
+        </div>
+
+        <div class="tabpane" id="pane-summary" style="display:none">
+          <div class="exptoolbar">
+            <button class="cp" data-sec="summary">复制</button>
+            <span class="explbl">导出【梳理结果】：</span>
+            <button data-sec="summary" data-f="txt">TXT</button>
+            <button data-sec="summary" data-f="md">MD</button>
+            <button data-sec="summary" data-f="xlsx">Excel</button>
+            <button data-sec="summary" data-f="pdf">PDF</button>
+          </div>
+          <div class="md" id="md"></div>
+        </div>
+
+        <div class="tabpane" id="pane-tech" style="display:none">
+          <div class="exptoolbar">
+            <button class="cp" data-sec="tech">复制</button>
+            <span class="explbl">导出【技术提取】：</span>
+            <button data-sec="tech" data-f="txt">TXT</button>
+            <button data-sec="tech" data-f="xlsx">Excel</button>
+            <button data-sec="tech" data-f="pdf">PDF</button>
+          </div>
+          <div class="techcard" id="tech"></div>
+        </div>
+
+        <div class="tabpane" id="pane-biling" style="display:none">
+          <div class="exptoolbar">
+            <button class="cp" data-sec="bilingual">复制</button>
+            <span class="explbl">导出【中英文对照】：</span>
+            <button data-sec="bilingual" data-f="txt">TXT</button>
+            <button data-sec="bilingual" data-f="xlsx">Excel</button>
+            <button data-sec="bilingual" data-f="pdf">PDF</button>
+          </div>
+          <div class="biling" id="bilingView"></div>
+        </div>
+        <div class="backfoot"><button class="backbtn" id="backBatch2">← 返回任务进度</button></div>
+      </div>
+    </section>
+
+    <!-- ---------- 页面：整批查看 ---------- -->
+    <section class="page" id="page-batch">
+      <div class="pageempty" id="batchEmpty">🗂 这里还没有内容
+        <span>请先到「📊 任务进度」点击「整批查看梳理结果」或「整批查看技术提取」</span></div>
+      <div id="batchView">
+        <button class="backbtn" id="backBatchView">← 返回任务进度</button>
+        <div class="stage" id="batchViewTitle" style="font-weight:600;color:var(--txt);font-size:16px"></div>
+        <div class="exptoolbar" id="batchViewToolbar" style="margin:8px 0"></div>
+        <div class="ovcontainer" id="batchViewBody"></div>
+        <div class="backfoot"><button class="backbtn" id="backBatchView2">← 返回任务进度</button></div>
+      </div>
+    </section>
+
+    <!-- ---------- 页面：模型与密钥 ---------- -->
+    <section class="page" id="page-settings">
+      <div class="pagehead">
+        <h2>模型与密钥</h2>
+        <p>密钥仅在本机浏览器保存（localStorage），用于调用阿里云 DashScope，提交时随请求发送。</p>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <div>
+            <label for="apikey">通义千问 API Key（可选）</label>
+            <input id="apikey" type="password" placeholder="DashScope API Key；留空则规则降级清洗" />
+          </div>
+          <div>
+            <label for="model">模型</label>
+            <select id="model">
+              <option value="qwen-max">qwen-max（最强，默认）</option>
+              <option value="qwen-plus">qwen-plus（均衡）</option>
+              <option value="qwen-turbo">qwen-turbo（更快更省）</option>
+            </select>
+          </div>
+        </div>
+        <div class="hint">该密钥同时用于两处：① 视频无字幕时的<b>语音转写</b>；② AI 字幕纠错与条理梳理。
+          若只处理「本身带有可提取字幕」的视频，留空也能跑通（基础规则清洗）。</div>
+
+        <details class="adv">
+          <summary>B站登录 Cookie（可选，非必填）</summary>
+          <label for="cookie">登录 Cookie</label>
+          <input id="cookie" type="password" placeholder="含 SESSDATA 的完整 Cookie；留空也完全可用" />
+          <div class="hint"><b>不填也能用</b>：没有字幕时应用会自动语音转写，无需任何 Cookie。
+            仅当你想优先提取「需登录才能看」的 UP 主字幕时才填它——获取方式：电脑浏览器登录 bilibili.com →
+            F12 打开开发者工具 → <b>网络/Network</b> 或 <b>应用/Application</b> → 复制请求头里的
+            <code>Cookie</code> 值（关键是含 <code>SESSDATA</code>）。</div>
+        </details>
+      </div>
+    </section>
+
+    <footer>
+      视频字幕智能体 · 后端 FastAPI + yt-dlp + DashScope 语音识别 + 通义千问<br/>
+      注意：部分需登录/付费的视频、YouTube（当前环境网络受限）可能无法抓取。
+    </footer>
+  </main>
+</div>
+
+<!-- 顺序加载：core → api → export → views → nav → app（普通脚本，共享全局作用域） -->
+<script src="/static/js/core.js"></script>
+<script src="/static/js/api.js"></script>
+<script src="/static/js/export.js"></script>
+<script src="/static/js/views.js"></script>
+<script src="/static/js/nav.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>

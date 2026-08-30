@@ -1,0 +1,6 @@
+{
+  "envId": "dev-d2gldfbb91a93f3e6",
+  "cloudrun": {
+    "name": "video-subtitle"
+  }
+}
