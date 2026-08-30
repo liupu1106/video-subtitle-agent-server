@@ -50,4 +50,10 @@ fi
 # 系统工具（ffmpeg 等）路径补全
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:$PATH"
 
+# 关闭任何本地/系统代理，强制后端直连外网。
+# 原因：api.bilibili.com / dashscope.aliyuncs.com 在本环境直连可达（实测 <0.3s），
+# 但沙箱/系统代理端口动态变化（56699→59225）且常失效，requests 走代理会 ProxyError。
+# 清空后 requests/websockets 直接连目标域名，最稳。CloudBase 上无此变量，unset 无害。
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy
+
 exec "$VENV/bin/uvicorn" app.main:app --host 127.0.0.1 --port 8000 --log-level info
