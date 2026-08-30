@@ -425,6 +425,16 @@ ASR_FILE_MODELS = ["paraformer-v2", "fun-asr"]  # 老接口兜底（需 oss 直�
 # 兼容旧部署：若显式设置 ASR_MODEL 环境变量，作为首选模型
 _ASR_MODEL_ENV = os.environ.get("ASR_MODEL", "").strip()
 
+# 模型优先级覆盖（快到期优先）：逗号分隔的模型名列表，写在 .env 的
+# ASR_MODEL_PRIORITY 中。例：
+#   ASR_MODEL_PRIORITY="qwen-audio-3.0-asr-flash-streaming,fun-asr-mtl-realtime,..."
+# 设了即覆盖上方默认顺序；仍保留"任一模型过期/无 token 自动跳下一个"的回退。
+_priority_env = os.environ.get("ASR_MODEL_PRIORITY", "").strip()
+if _priority_env:
+    _pri = [m.strip() for m in _priority_env.split(",") if m.strip()]
+    if _pri:
+        REALTIME_ASR_MODELS = _pri
+
 
 class _AsrModelUnavailable(Exception):
     """模型未开通配额 / 当前账号无可用额度，用于触发多模型回退。"""
