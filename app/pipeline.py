@@ -652,11 +652,18 @@ def _split_pcm_overlap(pcm, n, overlap_sec=1.5):
     return parts
 
 
-async def _realtime_ws_parallel(api_key, model, parts, job_id):
-    """并行跑多个实时 ASR 会话（同一模型）；任一分块失败则整体失败，触发上层模型回退。"""
-    results = await asyncio.gather(
-        *[_realtime_ws(api_key, model, p, job_id) for p in parts],
-        return_exceptions=True)
+async def _realtime_ws_parallel(api_key, model, parts, job_id, sem=None):
+    """并行跑多个实时 ASR 会话（同一模型）；任一分块失败则整体失败，触发上层模型回退。
+
+    sem：并发信号量，限制同时在线会话数 <= 账号实时 ASR 并发上限（实测 20 路），避免
+    Throttling.RateQuota 把多余分块拒掉导致整段识别失败。"""
+    sem = sem or asyncio.Semaphore(1 << 30)
+
+    async def _one(p):
+        async with sem:
+            return await _realtime_ws(api_key, model, p, job_id)
+
+    results = await asyncio.gather(*[_one(p) for p in parts], return_exceptions=True)
     out = []
     for r in results:
         if isinstance(r, Exception):
@@ -665,31 +672,64 @@ async def _realtime_ws_parallel(api_key, model, parts, job_id):
     return out
 
 
+def _remove_silence(wav_path):
+    """ffmpeg 静音切除：去掉 >=0.5s 的静音/停顿段，压缩有效语音时长，缩短实时识别耗时。
+
+    返回切除后的临时 wav 路径；失败时回退原路径（不阻断主流程）。"""
+    import tempfile
+    out = tempfile.mktemp(suffix=".wav")
+    try:
+        p = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(wav_path),
+             "-af", ("silenceremove=start_periods=1:stop_periods=-1:"
+                     "start_duration=0.3:stop_duration=0.5:"
+                     "start_threshold=-35dB:stop_threshold=-35dB"),
+             "-ar", "16000", "-ac", "1", "-loglevel", "error", out],
+            capture_output=True, timeout=300)
+        if p.returncode == 0 and Path(out).stat().st_size > 44:
+            return out
+    except Exception:
+        pass
+    try:
+        os.unlink(out)
+    except Exception:
+        pass
+    return wav_path
+
+
 def _realtime_asr(api_key, model, wav_path, job_id=None):
     """实时 ASR（含并行分块加速）：长音频切 N 块并发识别，总耗时≈单块时长。
 
-    实时接口服务端识别速率≈实时，单流无法快于音频时长；但把长音频切片、并发多路
-    实时会话，即可把整段识别时间从「音频时长」压到「单块时长」(≈ 音频时长/N)，这是
-    当前可用模型下唯一能显著缩短解析速度的手段（异步文件转录：本账号 qwen-audio-3.0
-    -asr-flash 报 url error、paraformer-v2 免费额度耗尽，均不可用）。"""
+    实时接口服务端识别速率≈实时，单流无法快于音频时长；把长音频切片、并发多路实时
+    会话（账号并发硬上限 ASR_MAX_CONCURRENCY，实测 20 路），即可把整段识别时间从「音频
+    时长」压到「单块时长」(≈ 音频时长/N)。一小时视频(3600s)切 20 块→单块 180s，20 路
+    并发≈180s；叠加静音切除(ASR_SILENCE_REMOVE)压缩有效语音后，典型可压到 3 分钟内。
+    异步文件转录本账号不可用（qwen-audio-3.0-asr-flash url error、paraformer-v2 配额耗尽）。"""
+    max_conc = max(1, int(os.environ.get("ASR_MAX_CONCURRENCY", "20")))
+    min_chunk = max(10, int(os.environ.get("ASR_MIN_CHUNK_SEC", "20")))
+    do_silence = os.environ.get("ASR_SILENCE_REMOVE", "1") not in ("0", "false", "no")
+    if do_silence:
+        try:
+            wav_path = _remove_silence(wav_path)
+        except Exception:
+            pass
     pcm = _realtime_pcm(wav_path)
     if not pcm:
         raise RuntimeError("音频解码为 PCM 失败，无法实时识别")
     dur = len(pcm) / (16000 * 2)
-    max_chunks = max(1, int(os.environ.get("ASR_MAX_CHUNKS", "6")))
-    chunk_sec = max(20, int(os.environ.get("ASR_CHUNK_SEC", "120")))
-    n = int(dur // chunk_sec) + (1 if (dur % chunk_sec) > 0 else 0)
-    n = max(1, min(max_chunks, n))
+    # 用满并发上限：块数 = min(并发上限, 时长/单块下限)，单块≈时长/块数，总耗时≈单块
+    n = min(max_conc, max(1, int(dur // min_chunk)))
     if n <= 1:
         return asyncio.run(_realtime_ws(api_key, model, pcm, job_id))
     if job_id:
         try:
             store.log(job_id, "语音转写", 45,
-                      f"音频 {dur:.0f}s 分 {n} 块并行实时识别加速（单块≈{dur/n:.0f}s）")
+                      f"音频 {dur:.0f}s 分 {n} 块并发实时识别加速（单块≈{dur/n:.0f}s，并发≤{max_conc}）")
         except Exception:
             pass
+    sem = asyncio.Semaphore(max_conc)
     parts = _split_pcm_overlap(pcm, n)
-    texts = asyncio.run(_realtime_ws_parallel(api_key, model, parts, job_id))
+    texts = asyncio.run(_realtime_ws_parallel(api_key, model, parts, job_id, sem))
     return "\n".join(t for t in texts if t).strip()
 
 
