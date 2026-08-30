@@ -30,7 +30,10 @@ async function postProcess(){
   let job;
   try{
     const res = await apiProcess({
-      url, api_key: apiKey, model: $("model").value,
+      url, api_key: apiKey,
+      asr_model: $("asrModel").value,
+      llm_model: $("llmModel").value,
+      fallback_model: $("fallbackModel").value,
       bili_cookie: cookie, batch, selected
     });
     job = res.batch_id || res.job_id;
@@ -170,10 +173,33 @@ document.querySelectorAll("#result .exptoolbar button.cp").forEach(b=>{
   };
 });
 
-/* ---------------- 初始化 ---------------- */
+/* ---------------- 初始化：拉取可用模型填充下拉框 ---------------- */
+async function fillModelSelects(){
+  // 给单个 select 追加选项（保留首个「自动/不指定」占位）
+  function fill(sel, items){
+    const first = sel.options[0];
+    sel.innerHTML = "";
+    sel.appendChild(first);
+    (items||[]).forEach(m=>{
+      const o = document.createElement("option");
+      o.value = m; o.textContent = m;
+      sel.appendChild(o);
+    });
+  }
+  try{
+    const d = await fetch("/api/models").then(r=>r.json());
+    fill($("asrModel"), d.asr);
+    fill($("llmModel"), d.llm);
+    // 替代模型：跨用途并集（语音 + 文本），让用户指定一个统一备用
+    const fb = Array.from(new Set((d.asr||[]).concat(d.llm||[])));
+    fill($("fallbackModel"), fb);
+  }catch(e){ /* 接口不可达时下拉框保留占位，仍可正常提交 */ }
+}
+
 try{
   const k = localStorage.getItem("vsb_apikey"); if(k) $("apikey").value = k;
   const c = localStorage.getItem("vsb_cookie"); if(c) $("cookie").value = c;
 }catch(e){}
+fillModelSelects();
 // 统一走一次 showPage，让各页「空状态 / 内容块」的显隐保持一致
 showPage("page-new");

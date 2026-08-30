@@ -69,6 +69,12 @@ def health():
     return {"status": "ok", "has_server_key": bool(SERVER_API_KEY)}
 
 
+@app.get("/api/models")
+def api_models():
+    """返回前端下拉框可用的模型列表：语音识别(asr) / 文本(llm) / 替代(fallback)。"""
+    return pipe.get_available_models()
+
+
 @app.get("/api/resolve")
 def resolve(url: str = ""):
     """探测链接是否可批量处理（番剧整季 / 视频多分P选集）。
@@ -123,6 +129,9 @@ async def process(req: Request):
     user_key = (payload.get("api_key") or "").strip()
     cookie = (payload.get("cookie") or "").strip()
     model = (payload.get("model") or "").strip() or None
+    asr_model = (payload.get("asr_model") or "").strip() or None
+    llm_model = (payload.get("llm_model") or "").strip() or None
+    fallback_model = (payload.get("fallback_model") or "").strip() or None
     if not url:
         raise HTTPException(status_code=400, detail="缺少 url 参数")
 
@@ -171,7 +180,8 @@ async def process(req: Request):
 
         def _run_child(cid, child_url, ep_title):
             with sem:
-                pipe.run_pipeline(cid, child_url, api_key, model, cookie, ep_title=ep_title)
+                pipe.run_pipeline(cid, child_url, api_key, model, cookie, ep_title=ep_title,
+                                  asr_model=asr_model, llm_model=llm_model, fallback_model=fallback_model)
 
         for ch, e in zip(children, eps):
             if source == "bangumi":
@@ -191,7 +201,8 @@ async def process(req: Request):
     threading.Thread(
         target=pipe.run_pipeline,
         args=(job_id, url, api_key, model),
-        kwargs={"bili_cookie": cookie},
+        kwargs={"bili_cookie": cookie,
+                "asr_model": asr_model, "llm_model": llm_model, "fallback_model": fallback_model},
         daemon=True,
     ).start()
     return {"job_id": job_id, "status": "running"}
@@ -203,6 +214,9 @@ async def upload(
     file: UploadFile = File(...),
     api_key: str = Form(""),
     model: str = Form(""),
+    asr_model: str = Form(""),
+    llm_model: str = Form(""),
+    fallback_model: str = Form(""),
 ):
     ip = _client_ip(req)
     if not _ip_rate_ok(ip):
@@ -223,11 +237,15 @@ async def upload(
     user_key = (api_key or "").strip()
     api_key_final = user_key or SERVER_API_KEY
     model_final = (model or "").strip() or None
+    asr_final = (asr_model or "").strip() or None
+    llm_final = (llm_model or "").strip() or None
+    fb_final = (fallback_model or "").strip() or None
     import threading
     threading.Thread(
         target=pipe.run_pipeline,
         args=(job_id, "", api_key_final, model_final),
-        kwargs={"local_file": str(dest)},
+        kwargs={"local_file": str(dest),
+                "asr_model": asr_final, "llm_model": llm_final, "fallback_model": fb_final},
         daemon=True,
     ).start()
     return {"job_id": job_id, "status": "running"}

@@ -261,7 +261,7 @@ SYSTEM_PROMPT = (
 )
 
 
-def llm_refine(text, title, api_key, model=None):
+def llm_refine(text, title, api_key, model=None, fallback=None):
     """通义千问校对+梳理。model 为可选首选模型，失败自动回退 LLM_MODELS。"""
     if not api_key:
         return None
@@ -271,7 +271,7 @@ def llm_refine(text, title, api_key, model=None):
         {"role": "user", "content": user},
     ]
     # 任一模型额度耗尽/未开通/过期则自动跳下一个；全失败抛错由上层降级
-    return llm_with_fallback(api_key, messages, preferred=model)
+    return llm_with_fallback(api_key, messages, preferred=model, fallback=fallback)
 
 
 def detect_lang(text):
@@ -297,14 +297,16 @@ def _llm_request(api_key, model, messages, response_format=None, max_tokens=2000
     return r.json()["choices"][0]["message"]["content"].strip()
 
 
-def llm_with_fallback(api_key, messages, response_format=None, max_tokens=2000, preferred=None):
-    """遍历 LLM_MODELS（preferred 排最前），任一模型「额度耗尽/未开通/过期」自动跳下一个。
+def llm_with_fallback(api_key, messages, response_format=None, max_tokens=2000, preferred=None, fallback=None):
+    """遍历 LLM_MODELS（preferred 排最前，fallback 置于末尾），任一模型「额度耗尽/未开通/过期」自动跳下一个。
 
     用于「AI 校验与梳理」步骤消耗文本模型额度；配合 .env 的 LLM_MODEL_PRIORITY
-    可把快到期的模型排前面优先消耗。"""
+    可把快到期的模型排前面优先消耗。fallback 为前端指定的统一替代模型。"""
     cands = list(LLM_MODELS)
     if preferred:
         cands = [preferred] + cands
+    if fallback and fallback not in cands:
+        cands.append(fallback)
     cands = list(dict.fromkeys(cands))  # 去重保序
     last_err = None
     for m in cands:
@@ -330,7 +332,7 @@ def _parse_json_or_none(content):
     return None
 
 
-def llm_tech_extract(text, title, api_key, model=None):
+def llm_tech_extract(text, title, api_key, model=None, fallback=None):
     """从字幕/转写中提炼：每一项技术的用途、是否支持国内使用、特别注意事项。
     返回 dict 或 None。"""
     if not api_key:
@@ -352,11 +354,11 @@ def llm_tech_extract(text, title, api_key, model=None):
         {"role": "user", "content": user},
     ]
     content = llm_with_fallback(api_key, messages, response_format={"type": "json_object"},
-                                max_tokens=3000, preferred=model)
+                                max_tokens=3000, preferred=model, fallback=fallback)
     return _parse_json_or_none(content)
 
 
-def llm_bilingual(text, title, api_key, model, src_lang):
+def llm_bilingual(text, title, api_key, model, src_lang, fallback=None):
     """把字幕按语义分段并翻译为对照文本。返回 [{orig, trans}] 或 None。"""
     if not api_key:
         return None
@@ -374,7 +376,7 @@ def llm_bilingual(text, title, api_key, model, src_lang):
         {"role": "user", "content": user},
     ]
     content = llm_with_fallback(api_key, messages, response_format={"type": "json_object"},
-                                max_tokens=4000, preferred=model)
+                                max_tokens=4000, preferred=model, fallback=fallback)
     obj = _parse_json_or_none(content)
     if isinstance(obj, list):
         return obj
@@ -479,6 +481,17 @@ if _llm_priority_env:
 class _AsrModelUnavailable(Exception):
     """模型未开通配额 / 当前账号无可用额度，用于触发多模型回退。"""
     pass
+
+
+def get_available_models():
+    """返回前端下拉框可用的模型列表：语音识别(asr) / 文本(llm) / 替代(fallback)。
+
+    fallback 为 asr+llm 的并集（用户可指定一个跨用途的备选模型：当首选模型
+    过期/无 token 时优先用它，再不行才回退默认列表）。"""
+    asr = list(dict.fromkeys(REALTIME_ASR_MODELS))
+    llm = list(dict.fromkeys(LLM_MODELS))
+    fallback = list(dict.fromkeys(asr + llm))
+    return {"asr": asr, "llm": llm, "fallback": fallback}
 
 
 def _dashscope_upload(api_key, model, file_path):
@@ -783,7 +796,7 @@ def _realtime_asr(api_key, model, wav_path, job_id=None):
     return "\n".join(t for t in texts if t).strip()
 
 
-def dashscope_asr(wav_path, api_key, model=None, job_id=None):
+def dashscope_asr(wav_path, api_key, model=None, asr_model=None, fallback_model=None, job_id=None):
     """DashScope 语音识别，自动多模型回退。
 
     优先走实时(WebSocket)接口：用户控制台已开通的 fun-asr-mtl-realtime 等实时模型
@@ -791,14 +804,22 @@ def dashscope_asr(wav_path, api_key, model=None, job_id=None):
     fun-asr 免费额度已耗尽时仍可用）。仅当实时接口都不可用（未开通/配额耗尽）时，
     才回退到老的异步文件转录接口（paraformer-v2/fun-asr，需 oss 直传）。
 
+    候选顺序：ASR_MODEL 环境变量 > asr_model(前端首选) > model(兼容旧参数) >
+    REALTIME_ASR_MODELS 默认列表 > fallback_model(前端替代)。任一模型调用失败
+    （过期/无 token/不支持）都会自动跳到下一个，全部失败才报错。
+
     历史坑：早期用「本服务公网路由 + file_urls 回拉」，带访问鉴权的域名返回 401 HTML
     被当成音频解码 → DECODE_ERROR；改用实时推流后不再依赖公网可达。"""
     rt_cands = []
     if _ASR_MODEL_ENV:
         rt_cands.append(_ASR_MODEL_ENV)
+    if asr_model:
+        rt_cands.append(asr_model)
     if model:
         rt_cands.append(model)
     rt_cands += list(REALTIME_ASR_MODELS)
+    if fallback_model and fallback_model not in rt_cands:
+        rt_cands.append(fallback_model)
     rt_cands = list(dict.fromkeys(rt_cands))  # 去重保序
 
     for m in rt_cands:
@@ -806,7 +827,7 @@ def dashscope_asr(wav_path, api_key, model=None, job_id=None):
             if job_id:
                 store.log(job_id, "语音转写", 52, f"DashScope 实时识别({m})中")
             return _realtime_asr(api_key, m, wav_path, job_id), "zh(识别)"
-        except _AsrModelUnavailable as e:
+        except Exception as e:
             if job_id:
                 store.log(job_id, "语音转写", 56, f"{m} 不可用，尝试下一模型")
             continue
@@ -817,7 +838,7 @@ def dashscope_asr(wav_path, api_key, model=None, job_id=None):
             if job_id:
                 store.log(job_id, "语音转写", 52, f"DashScope 文件转录({m})中")
             return _asr_try_model(wav_path, api_key, m, job_id), "zh(识别)"
-        except _AsrModelUnavailable as e:
+        except Exception as e:
             if job_id:
                 store.log(job_id, "语音转写", 56, f"{m} 无配额，尝试下一模型")
             continue
@@ -829,11 +850,12 @@ def dashscope_asr(wav_path, api_key, model=None, job_id=None):
         "若仍想用老的 paraformer-v2/fun-asr，请在其免费额度耗尽后在控制台开通或付费。")
 
 
-def do_asr(wav_path, api_key, job_id):
+def do_asr(wav_path, api_key, job_id, asr_model=None, fallback_model=None):
     """语音转写：DashScope Paraformer（需 Key，中文效果好、无需下载模型）。
     本环境未内置离线 Whisper 模型，未配置 Key 时给出明确提示。"""
     if api_key:
-        return dashscope_asr(wav_path, api_key, job_id=job_id)
+        return dashscope_asr(wav_path, api_key, asr_model=asr_model,
+                             fallback_model=fallback_model, job_id=job_id)
     raise RuntimeError(
         "服务端未配置 DASHSCOPE_API_KEY，且请求未携带 api_key，无法语音转写。"
         "请在服务端环境变量配置 Key（推荐），或在页面填入通义千问 Key。"
@@ -843,11 +865,17 @@ def do_asr(wav_path, api_key, job_id):
 # ---------------------------------------------------------------------------
 # 主流水线
 # ---------------------------------------------------------------------------
-def run_pipeline(job_id, url, api_key, model, bili_cookie="", local_file=None, ep_title=None):
+def run_pipeline(job_id, url, api_key, model, bili_cookie="", local_file=None, ep_title=None,
+                 asr_model=None, llm_model=None, fallback_model=None):
     """执行一次完整处理。
 
     url 为空且给了 local_file 时走「用户上传自有音视频」路径——这条入口不抓取
     第三方站点内容，是应用商店上架时的合规主路径。
+
+    asr_model / llm_model / fallback_model 由前端下拉框指定（留空=用默认列表自动回退）：
+    - asr_model:   语音识别首选模型
+    - llm_model:   AI 梳理/翻译首选文本模型（兼容旧参数 model 作为兜底）
+    - fallback_model: 任一用途首选不可用时的统一替代模型
     """
     workdir = tempfile.mkdtemp(prefix="vsb_")
     try:
@@ -864,7 +892,8 @@ def run_pipeline(job_id, url, api_key, model, bili_cookie="", local_file=None, e
             store.set_meta(job_id, {"title": title, "platform": platform, "duration": None})
             store.log(job_id, "读取文件", 10, f"已接收上传文件 {title}")
             audio = transcode_for_asr(Path(local_file), Path(workdir))
-            raw, sub_lang = do_asr(audio, api_key, job_id)
+            raw, sub_lang = do_asr(audio, api_key, job_id,
+                                   asr_model=asr_model, fallback_model=fallback_model)
             method = "asr"
         elif bili.is_bilibili(url):
             # —— B 站：直连数据 API（绕过 www 页面 412）——
@@ -895,7 +924,8 @@ def run_pipeline(job_id, url, api_key, model, bili_cookie="", local_file=None, e
                 wav = bili.download_audio_to(
                     url, Path(workdir) / "audio.wav",
                     int(os.environ.get("MAX_AUDIO_SEC", "7200")), cookie=bili_cookie)
-                raw, sub_lang = do_asr(wav, api_key, job_id)
+                raw, sub_lang = do_asr(wav, api_key, job_id,
+                                       asr_model=asr_model, fallback_model=fallback_model)
                 method = "asr"
         else:
             # —— 通用直链 / 其他平台：yt-dlp ——
@@ -922,7 +952,8 @@ def run_pipeline(job_id, url, api_key, model, bili_cookie="", local_file=None, e
             if method is None:
                 store.log(job_id, "下载音频", 35, "未找到可用字幕，开始语音转写")
                 wav = download_audio(url, workdir)
-                raw, det_lang = do_asr(wav, api_key, job_id)
+                raw, det_lang = do_asr(wav, api_key, job_id,
+                                       asr_model=asr_model, fallback_model=fallback_model)
                 method = "asr"
                 sub_lang = det_lang
 
@@ -944,12 +975,13 @@ def run_pipeline(job_id, url, api_key, model, bili_cookie="", local_file=None, e
             store.log(job_id, "对照翻译", 92,
                      f"调用通义千问生成中英文对照（原文为{'英文' if bl_lang == 'en' else '中文'}）")
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
-                f_refine = ex.submit(llm_refine, raw, title, api_key, model)
-                f_tech = ex.submit(llm_tech_extract, raw, title, api_key, model)
+                _preferred_llm = llm_model or model
+                f_refine = ex.submit(llm_refine, raw, title, api_key, _preferred_llm, fallback_model)
+                f_tech = ex.submit(llm_tech_extract, raw, title, api_key, _preferred_llm, fallback_model)
                 src_for_bl = clean[:12000] if len(clean) > 12000 else clean
                 if len(clean) > 12000:
                     store.log(job_id, "对照翻译", 92, "字幕较长，仅翻译前 12000 字用于对照")
-                f_bl = ex.submit(llm_bilingual, src_for_bl, title, api_key, model, bl_lang)
+                f_bl = ex.submit(llm_bilingual, src_for_bl, title, api_key, _preferred_llm, bl_lang, fallback_model)
                 try:
                     structured = f_refine.result()
                 except Exception as e:

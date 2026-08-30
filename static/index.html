@@ -64,6 +64,25 @@
         <label for="url">视频链接</label>
         <input id="url" placeholder="https://www.bilibili.com/video/BVxxxx 或 https://xxx.mp4" />
 
+        <div class="selpanel" style="margin-top:14px">
+          <div class="selhead"><span class="explbl">模型选择（可选，留空则按默认顺序自动回退可用模型）</span></div>
+          <div class="row" style="margin-top:8px">
+            <div>
+              <label for="asrModel">🎙 语音识别模型</label>
+              <select id="asrModel"><option value="">自动（默认列表）</option></select>
+            </div>
+            <div>
+              <label for="llmModel">💬 文本模型（AI 梳理/翻译）</label>
+              <select id="llmModel"><option value="">自动（默认列表）</option></select>
+            </div>
+            <div>
+              <label for="fallbackModel">🔁 替代模型（首选不可用时的备用）</label>
+              <select id="fallbackModel"><option value="">不指定</option></select>
+            </div>
+          </div>
+          <div class="hint">这三个下拉框由后端 <code>/api/models</code> 动态填充，展示你账户当前可用的模型。优先使用快到期的模型省钱；若某模型过期或无 token，系统会自动依次尝试列表中的下一个。</div>
+        </div>
+
         <div class="ckrow" style="margin-top:14px">
           <label class="ck"><input type="checkbox" id="batch" disabled /> 整集批量解析（番剧整季 / 视频选集多P）</label>
           <span class="ckhint" id="batchHint">粘贴番剧整季或视频选集（多P）链接后，此处自动可用，将逐集处理并可在下方逐集导出</span>
@@ -193,17 +212,10 @@
             <label for="apikey">通义千问 API Key（可选）</label>
             <input id="apikey" type="password" placeholder="DashScope API Key；留空则规则降级清洗" />
           </div>
-          <div>
-            <label for="model">模型</label>
-            <select id="model">
-              <option value="qwen-max">qwen-max（最强，默认）</option>
-              <option value="qwen-plus">qwen-plus（均衡）</option>
-              <option value="qwen-turbo">qwen-turbo（更快更省）</option>
-            </select>
-          </div>
         </div>
         <div class="hint">该密钥同时用于两处：① 视频无字幕时的<b>语音转写</b>；② AI 字幕纠错与条理梳理。
-          若只处理「本身带有可提取字幕」的视频，留空也能跑通（基础规则清洗）。</div>
+          若只处理「本身带有可提取字幕」的视频，留空也能跑通（基础规则清洗）。
+          模型选择在「🚀 新建解析」页的下拉框中设定（语音识别 / 文本 / 替代模型）。</div>
 
         <details class="adv">
           <summary>B站登录 Cookie（可选，非必填）</summary>
