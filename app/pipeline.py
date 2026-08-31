@@ -359,7 +359,11 @@ def llm_tech_extract(text, title, api_key, model=None, fallback=None):
 
 
 def llm_bilingual(text, title, api_key, model, src_lang, fallback=None):
-    """把字幕按语义分段并翻译为对照文本。返回 [{orig, trans}] 或 None。"""
+    """把字幕按语义分段并翻译为对照文本。返回 [{orig, trans}] 或 None。
+
+    注意：DashScope/qwen 的 response_format=json_object 强制顶层必须是 JSON 对象，
+    不能返回裸数组（否则 API 报错 / 解析失败 → 调用方拿到 None → 中英对照不可用）。
+    因此这里要求模型返回 {"pairs":[{orig,trans}...]}，并兼容裸数组/其它键名的非常规返回。"""
     if not api_key:
         return None
     tgt = "中文" if src_lang == "en" else "英文"
@@ -367,8 +371,8 @@ def llm_bilingual(text, title, api_key, model, src_lang, fallback=None):
     system = (
         f"你负责字幕翻译与分段。请把用户给出的{srclbl}字幕按语义切分成若干段落"
         f"（每段 3-6 句），并为每段提供{tgt}译文。"
-        '以严格 JSON 数组返回，每个元素格式：{"orig": "原段落文字", "trans": "译文文字"}。'
-        "只返回 JSON 数组，不要任何解释或 markdown 代码块。"
+        '以严格 JSON 对象返回，格式：{"pairs": [{"orig": "原段落文字", "trans": "译文文字"}]}。'
+        "只返回 JSON 对象，不要任何解释或 markdown 代码块。"
     )
     user = f"视频标题：{title}\n\n==== {srclbl}字幕 ====\n{text}\n\n请分段并翻译为{tgt}。"
     messages = [
@@ -376,11 +380,16 @@ def llm_bilingual(text, title, api_key, model, src_lang, fallback=None):
         {"role": "user", "content": user},
     ]
     content = llm_with_fallback(api_key, messages, response_format={"type": "json_object"},
-                                max_tokens=4000, preferred=model, fallback=fallback)
+                                max_tokens=6000, preferred=model, fallback=fallback)
     obj = _parse_json_or_none(content)
+    # 兼容多种返回结构：直接是数组 / 包在 pairs、translations、items 等键下 / 任意值为列表
     if isinstance(obj, list):
         return obj
     if isinstance(obj, dict):
+        for key in ("pairs", "translations", "items", "data", "result", "list"):
+            v = obj.get(key)
+            if isinstance(v, list):
+                return v
         for v in obj.values():
             if isinstance(v, list):
                 return v
