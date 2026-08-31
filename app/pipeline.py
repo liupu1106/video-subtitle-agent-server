@@ -272,7 +272,11 @@ def detect_lang(text):
 
 
 def _llm_request(api_key, model, messages, response_format=None, max_tokens=2000):
-    """单次调用通义千问 chat/completions，返回 content 字符串；非 200 抛错（供回退）。"""
+    """单次调用通义千问 chat/completions，返回 content 字符串；异常一律抛错（供回退）。
+
+    任何异常（非 200 / 非 JSON 网关错误页 / 无 choices / 空内容）都会 raise，
+    让上层 llm_with_fallback 自动跳到下一个模型——避免单个模型配额耗尽/网关异常
+    导致整段任务失败（如 "Expecting value" 类 JSON 解析错误）。"""
     body = {"model": model, "messages": messages, "temperature": 0.3, "max_tokens": max_tokens}
     if response_format:
         body["response_format"] = response_format
@@ -280,7 +284,17 @@ def _llm_request(api_key, model, messages, response_format=None, max_tokens=2000
     r = requests.post(DASHSCOPE_URL, headers=headers, json=body, timeout=180)
     if r.status_code != 200:
         raise RuntimeError(f"llm {model} {r.status_code}: {r.text[:300]}")
-    return r.json()["choices"][0]["message"]["content"].strip()
+    try:
+        data = r.json()
+    except Exception:
+        raise RuntimeError(f"llm {model} 返回非 JSON（可能是网关/代理错误页）：{r.text[:200]}")
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except Exception:
+        raise RuntimeError(f"llm {model} 响应缺少 choices 字段：{str(data)[:200]}")
+    if not content or not str(content).strip():
+        raise RuntimeError(f"llm {model} 返回空内容")
+    return str(content).strip()
 
 
 def llm_with_fallback(api_key, messages, response_format=None, max_tokens=2000, preferred=None, fallback=None):
@@ -496,9 +510,16 @@ def _parse_dashscope_transcript(raw_text):
 #   且控制台显示的 `qwen-audio-3.0-asr-flash`、`qwen3-asr-flash-realtime-*` 对应实时 API 的
 #   实际模型名为 `qwen-audio-3.0-asr-flash-streaming`、以及 `fun-asr-mtl-realtime` 等。
 REALTIME_ASR_MODELS = [
-    "fun-asr-mtl-realtime",                 # 用户控制台"使用中"模型（多语种实时）
+    # —— 通义千问实时语音识别（推荐优先，覆盖中/英/多语种）——
+    "qwen3-asr-flash-realtime",            # 最新实时 ASR（控制台显示 qwen3-asr-flash-realtime）
+    "qwen-audio-3.0-asr-flash-streaming",  # 控制台显示名 qwen-audio-3.0-asr-flash
+    "qwen-audio-3.0-realtime-flash",
+    "qwen-audio-3.0-realtime-plus",
+    "qwen3.5-omni-flash-realtime",          # omni 实时（含 ASR 能力）
+    "qwen3.5-omni-plus-realtime",
+    # —— Fun-ASR 系列（老牌多语种实时，控制台常显"使用中"）——
+    "fun-asr-mtl-realtime",                 # 多语种实时
     "fun-asr-realtime",
-    "qwen-audio-3.0-asr-flash-streaming",   # 控制台显示名 qwen-audio-3.0-asr-flash
     "fun-asr-flash-8k-realtime",            # 8k 电话音质兜底
 ]
 ASR_FILE_MODELS = ["paraformer-v2", "fun-asr"]  # 老接口兜底（需 oss 直传）
@@ -507,7 +528,7 @@ _ASR_MODEL_ENV = os.environ.get("ASR_MODEL", "").strip()
 
 # 模型优先级覆盖（快到期优先）：逗号分隔的模型名列表，写在 .env 的
 # ASR_MODEL_PRIORITY 中。例：
-#   ASR_MODEL_PRIORITY="qwen-audio-3.0-asr-flash-streaming,fun-asr-mtl-realtime,..."
+#   ASR_MODEL_PRIORITY="qwen3-asr-flash-realtime,fun-asr-mtl-realtime,..."
 # 设了即覆盖上方默认顺序；仍保留"任一模型过期/无 token 自动跳下一个"的回退。
 _priority_env = os.environ.get("ASR_MODEL_PRIORITY", "").strip()
 if _priority_env:
@@ -520,10 +541,17 @@ if _priority_env:
 # qwen-plus 系列用于「字幕智能梳理」步骤，消耗文本模型额度。
 # 快到期优先：把将要过期的模型写在前面；也可经 .env 的 LLM_MODEL_PRIORITY 覆盖。
 # 运行时任一模型额度耗尽/未开通/过期，llm_with_fallback 会自动跳到下一个。
+# 下方为「策划的当前千问主力」清单；运行时还会经 DashScope 模型接口实时合并
+# 当前账号"可用"的全部模型（见 get_available_models），实现自由切换 + 逐模型降级。
 LLM_MODELS = [
-    "qwen3.5-plus",   # 快到期优先
-    "qwen3.6-plus",
-    "qwen3.7-plus",
+    # 最新 qwen3.x 主力（文本梳理/翻译首选）
+    "qwen3.5-plus", "qwen3.6-plus", "qwen3.7-plus",
+    "qwen3.7-max", "qwen3.6-max-preview", "qwen3-max", "qwen-max", "qwen-max-latest",
+    "qwen3.5-flash", "qwen3.6-flash", "qwen3.7-flash", "qwen-flash",
+    "qwen-plus", "qwen-plus-latest", "qwen-long", "qwen-turbo",
+    # 更新代际（若已开通）
+    "qwen3.8-flash", "qwen3.8-max", "qwen3.8-27b",
+    "qwen3-next-80b-a3b-instruct", "qwen3-coder-plus",
 ]
 _llm_priority_env = os.environ.get("LLM_MODEL_PRIORITY", "").strip()
 if _llm_priority_env:
@@ -537,13 +565,95 @@ class _AsrModelUnavailable(Exception):
     pass
 
 
-def get_available_models():
+# ---------------------------------------------------------------------------
+# 实时模型发现：调用 DashScope 模型列表接口，动态获取当前账号"可用"的模型，
+# 与上方策划清单合并 —— 这样下拉框永远展示千问当前支持的全部模型，且能自由切换；
+# 运行时任一模型不可用都会自动跳到下一个（见 llm_with_fallback / dashscope_asr）。
+# ---------------------------------------------------------------------------
+def _fetch_dashscope_models(api_key):
+    """调用 DashScope OpenAI 兼容模型列表接口，返回模型 id 列表（直连，绕过本地代理）。
+    失败返回空列表（不影响主流程，退回策划清单）。"""
+    try:
+        proxies = {"http": None, "https": None}  # 强制直连，避免本地代理拦截
+        r = requests.get(
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            proxies=proxies, timeout=20,
+        )
+        if r.status_code != 200:
+            return []
+        return [m.get("id") for m in (r.json().get("data") or []) if m.get("id")]
+    except Exception:
+        return []
+
+
+# 控制台显示名 → 实时 WebSocket 实际模型名 的别名映射（接口返回的常是控制台别名）
+_ASR_ALIASES = {
+    "qwen-audio-3.0-asr-flash": "qwen-audio-3.0-asr-flash-streaming",
+    "qwen3-asr-flash": "qwen3-asr-flash-realtime",
+    "qwen3.5-omni-flash": "qwen3.5-omni-flash-realtime",
+    "qwen3.5-omni-plus": "qwen3.5-omni-plus-realtime",
+}
+
+
+def _classify_dashscope_models(ids):
+    """把 DashScope 模型列表分成 (asr_realtime, llm_text)。
+
+    - asr_realtime：看起来是实时语音识别的模型（含别名映射后的真实 WS 名）。
+    - llm_text：纯文本对话模型（qwen* 且非 多模态/语音合成/向量 等）。
+    过滤掉明显噪声（旧小模型、视觉/图像/tts/embedding 等），保留可自由切换的可用项。"""
+    asr, llm = [], []
+    _noise = ("vl", "image", "tts", "embed", "rerank", "cosy", "s2s",
+              "math-", "1.8b", "7b", "14b", "72b", "32b", "110b", "57b", "235b",
+              "397b", "0.5b", "1.5b", "30b", "27b", "35b", "122b", "2.4t", "80b",
+              "399b", "a3b", "a10b", "a17b", "a22b", "a35b")
+    for i in ids:
+        il = (i or "").lower()
+        if not il.startswith("qwen"):
+            continue
+        # ASR 实时：含 asr/realtime/paraformer/sensevoice/audio/omni 且非 tts
+        if ("tts" not in il) and any(k in il for k in
+                ("asr", "realtime", "paraformer", "sensevoice", "qwen-audio", "qwen3-asr",
+                 "qwen3.5-omni", "qwen3-omni")):
+            asr.append(i)
+            if i in _ASR_ALIASES:
+                asr.append(_ASR_ALIASES[i])
+            continue
+        # LLM 文本：非 多模态/语音合成/向量/旧小模型
+        if any(n in il for n in _noise):
+            continue
+        if any(k in il for k in ("plus", "max", "flash", "turbo", "long", "next",
+                                  "deep", "mt", "omni", "preview")):
+            llm.append(i)
+    return asr, llm
+
+
+# 模型发现结果按 key 缓存 5 分钟，避免每次打开页面都打 DashScope
+_MODEL_CACHE = {}
+
+
+def get_available_models(api_key=None):
     """返回前端下拉框可用的模型列表：语音识别(asr) / 文本(llm) / 替代(fallback)。
 
-    fallback 为 asr+llm 的并集（用户可指定一个跨用途的备选模型：当首选模型
-    过期/无 token 时优先用它，再不行才回退默认列表）。"""
+    - 基础清单为策划的当前千问主力模型（离线/无 key 也可用）。
+    - 若提供 api_key，则实时调用 DashScope 模型接口，把当前账号"可用"的模型合并进来，
+      实现"加载千问所有支持的相应模型 + 自由切换"；失败则优雅退回策划清单。
+    fallback 为 asr+llm 的并集（用户可指定一个跨用途的备选模型）。"""
     asr = list(dict.fromkeys(REALTIME_ASR_MODELS))
     llm = list(dict.fromkeys(LLM_MODELS))
+    if api_key:
+        try:
+            now = time.time()
+            cached = _MODEL_CACHE.get(api_key)
+            if cached and now - cached[0] < 300:
+                d_asr, d_llm = cached[1]
+            else:
+                d_asr, d_llm = _classify_dashscope_models(_fetch_dashscope_models(api_key))
+                _MODEL_CACHE[api_key] = (now, (d_asr, d_llm))
+            asr = list(dict.fromkeys(asr + d_asr))
+            llm = list(dict.fromkeys(llm + d_llm))
+        except Exception:
+            pass
     fallback = list(dict.fromkeys(asr + llm))
     return {"asr": asr, "llm": llm, "fallback": fallback}
 
@@ -946,11 +1056,14 @@ def dashscope_asr(wav_path, api_key, model=None, asr_model=None, fallback_model=
                 store.log(job_id, "语音转写", 56, f"{m} 无配额，尝试下一模型")
             continue
 
+    tried = "、".join(rt_cands + list(ASR_FILE_MODELS))
     raise RuntimeError(
-        "所有语音识别模型均不可用。请到阿里云百炼控制台开通实时语音识别模型"
-        "（fun-asr-mtl-realtime 等每月赠送免费额度，需手动开通后才计入），开通页："
+        "所有语音识别模型均尝试失败（已依次尝试 %d 个：%s）。"
+        "通常为该账号未开通实时语音识别模型或配额耗尽。请到阿里云百炼控制台开通实时语音识别模型"
+        "（fun-asr-mtl-realtime / qwen3-asr-flash-realtime 等每月赠送免费额度，需手动开通后才计入），开通页："
         "https://bailian.console.aliyun.com/#/model-market 。"
-        "若仍想用老的 paraformer-v2/fun-asr，请在其免费额度耗尽后在控制台开通或付费。")
+        "若仍想用老的 paraformer-v2/fun-asr，请在其免费额度耗尽后在控制台开通或付费。"
+        % (len(rt_cands) + len(ASR_FILE_MODELS), tried))
 
 
 def do_asr(wav_path, api_key, job_id, asr_model=None, fallback_model=None):

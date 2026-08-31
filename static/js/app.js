@@ -187,7 +187,10 @@ async function fillModelSelects(){
     });
   }
   try{
-    const d = await fetch("/api/models").then(r=>r.json());
+    // 若用户已填自己的 DashScope Key，则用它实时查询「当前可用」模型（自由切换 + 逐模型降级）
+    const k = (localStorage.getItem("vsb_apikey")||"").trim();
+    const url = k ? ("/api/models?api_key="+encodeURIComponent(k)) : "/api/models";
+    const d = await fetch(url).then(r=>r.json());
     fill($("asrModel"), d.asr);
     fill($("llmModel"), d.llm);
     // 替代模型：跨用途并集（语音 + 文本），让用户指定一个统一备用

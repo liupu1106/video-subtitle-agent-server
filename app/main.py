@@ -70,9 +70,17 @@ def health():
 
 
 @app.get("/api/models")
-def api_models():
-    """返回前端下拉框可用的模型列表：语音识别(asr) / 文本(llm) / 替代(fallback)。"""
-    return pipe.get_available_models()
+def api_models(api_key: str = ""):
+    """返回前端下拉框可用的模型列表：语音识别(asr) / 文本(llm) / 替代(fallback)。
+
+    可选 api_key：传入后用该账号实时查询 DashScope「当前可用」模型并合并，实现
+    「加载千问所有支持的相应模型 + 自由切换」；缺省则用服务端 SERVER_API_KEY 做发现，
+    都没 key 时退回策划的静态清单。任何异常都优雅降级，不影响主流程。"""
+    key = (api_key or "").strip() or SERVER_API_KEY
+    try:
+        return pipe.get_available_models(key or None)
+    except Exception:
+        return pipe.get_available_models(None)
 
 
 @app.get("/api/resolve")

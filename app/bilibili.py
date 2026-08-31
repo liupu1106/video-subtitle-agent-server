@@ -376,8 +376,11 @@ def _download_subtitle_text(url, cookie=None):
     return "\n".join(b.get("content", "") for b in body if b.get("content"))
 
 
-def get_audio_url(url, cookie=None):
-    """返回 B 站 DASH 音频直链（用于下载后语音转写）"""
+def get_audio_urls(url, cookie=None):
+    """返回 B 站 DASH 音频候选直链列表（baseUrl 在前，backupUrl 在后，按码率排序）。
+
+    不同 CDN 节点（upos-sz-mirrorhw / upos-hz-mirrorakam 等）连通性不同，下载时
+    逐个回退可显著提升成功率（缓解单节点 HTTPSConnectionPool 失败）。"""
     info = get_info(url, cookie)
     s = get_session(cookie)
     pu = s.get("https://api.bilibili.com/x/player/wbi/playurl",
@@ -390,27 +393,63 @@ def get_audio_url(url, cookie=None):
         raise RuntimeError("未获取到音频流（视频可能需登录/付费）")
     # 选码率最高
     audios.sort(key=lambda a: a.get("bandwidth", 0), reverse=True)
-    return audios[0].get("baseUrl")
+    cands = []
+    for a in audios:
+        base = a.get("baseUrl")
+        if base and base not in cands:
+            cands.append(base)
+        for bk in (a.get("backupUrl") or []):
+            if bk and bk not in cands:
+                cands.append(bk)
+    return cands
+
+
+def get_audio_url(url, cookie=None):
+    """返回 B 站 DASH 音频首选直链（兼容旧调用，等价于 get_audio_urls()[0]）。"""
+    cands = get_audio_urls(url, cookie)
+    if not cands:
+        raise RuntimeError("未获取到音频流（视频可能需登录/付费）")
+    return cands[0]
 
 
 def download_audio_to(url, dst_wav, max_sec=7200, cookie=None):
     """下载 B 站音频。有 ffmpeg 时转 16k 单声道 wav，否则保留原始 m4a。
-    返回实际可用的音频文件路径（扩展名与真实编码保持一致）。"""
+    返回实际可用的音频文件路径（扩展名与真实编码保持一致）。
+
+    健壮性：依次尝试所有 CDN 候选直链(baseUrl + backupUrl)，每个最多重试 3 次并退避，
+    任一成功即停止——缓解单 CDN 节点（如 upos-sz-mirrorhw）连接失败。"""
     import os
     import shutil as _sh
-    audio_url = get_audio_url(url, cookie)
+    import subprocess
+    urls = get_audio_urls(url, cookie)
     s = get_session(cookie)
     tmp = dst_wav.with_suffix(".m4a")
-    with s.get(audio_url, timeout=120, stream=True) as resp:
-        resp.raise_for_status()
-        with open(tmp, "wb") as f:
-            for chunk in resp.iter_content(1024 * 256):
-                if chunk:
-                    f.write(chunk)
+    downloaded = False
+    last_err = None
+    for u in urls:
+        for attempt in range(3):
+            try:
+                with s.get(u, timeout=120, stream=True) as resp:
+                    resp.raise_for_status()
+                    with open(tmp, "wb") as f:
+                        for chunk in resp.iter_content(1024 * 256):
+                            if chunk:
+                                f.write(chunk)
+                if tmp.stat().st_size > 0:
+                    downloaded = True
+                    break
+                raise RuntimeError("下载内容为空")
+            except Exception as e:
+                last_err = e
+                if attempt < 2:
+                    time.sleep(2 * (attempt + 1))  # 退避 2s / 4s
+        if downloaded:
+            break
+    if not downloaded:
+        raise RuntimeError("B站音频下载失败（所有 CDN 直链均不可用）：%s" % (last_err,))
     if _sh.which("ffmpeg"):
         # 合并「抽取音频+静音切除+解码为 PCM」为单次 ffmpeg，直接产 .pcm 供实时 ASR，
         # 省掉原流程里 转 wav → 静音切除 → 再解码 PCM 的两次串行 ffmpeg 开销
-        import subprocess
         dst_pcm = dst_wav.with_suffix(".pcm")
         do_silence = os.environ.get("ASR_SILENCE_REMOVE", "1") not in ("0", "false", "no")
         af = ""
