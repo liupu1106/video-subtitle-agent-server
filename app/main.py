@@ -389,6 +389,34 @@ async def export_all(req: Request):
     return Response(zbytes, media_type="application/zip", headers={"Content-Disposition": cd})
 
 
+@app.post("/api/visualize")
+async def visualize(req: Request):
+    """根据梳理内容生成理解视图（Mermaid 定义）。前端「梳理」区按钮调用。"""
+    try:
+        payload = json.loads(await req.body() or b"{}")
+    except Exception:
+        raise HTTPException(status_code=400, detail="请求体不是合法 JSON")
+    text = (payload.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="缺少 text 参数（需传入梳理内容）")
+    title = (payload.get("title") or "").strip()
+    user_key = (payload.get("api_key") or "").strip()
+    model = (payload.get("model") or "").strip() or None
+    fallback_model = (payload.get("fallback_model") or "").strip() or None
+    api_key = user_key or SERVER_API_KEY
+    if not api_key:
+        raise HTTPException(status_code=400,
+                            detail="缺少 api_key（请在「设置」页或「新建解析」页填写 DashScope Key）")
+    try:
+        spec = pipe.llm_visualize(text, title, api_key, model=model, fallback=fallback_model)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail="生成可视化失败：" + str(e)[:200])
+    if not spec:
+        raise HTTPException(status_code=502,
+                            detail="生成可视化失败：模型未返回有效结构（可能未开通文本模型额度，或内容过短）")
+    return spec
+
+
 # ---------------------------------------------------------------------------
 # 分区内容构建 + 多格式序列化
 # ---------------------------------------------------------------------------

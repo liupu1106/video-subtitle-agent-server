@@ -155,3 +155,15 @@
 .historyitem .ht{color:var(--txt);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .historyitem button{background:rgba(124,147,255,.14);border:1px solid rgba(124,147,255,.38);color:#aebcff;border-radius:9px;padding:6px 13px;font-size:12px;cursor:pointer;transition:.16s}
 .historyitem button:hover{border-color:var(--brand);color:#fff}
+
+/* ---------- 理解视图（梳理区一键生成，Mermaid 渲染）---------- */
+.vizbar{margin:12px 0 0}
+.vizbox{margin-top:14px;background:#0a0d1a;border:1px solid var(--line);border-radius:14px;padding:20px 24px;max-width:880px;margin-left:auto;margin-right:auto}
+.vizhead{font-size:15px;font-weight:600;color:#fff;margin-bottom:6px}
+.viztype{color:var(--brand);font-size:12px;font-weight:400;margin-left:6px;opacity:.9}
+.vizcap{font-size:13px;color:var(--sub);margin-bottom:12px;line-height:1.7}
+.vizsvg{display:flex;justify-content:center;overflow:auto}
+.vizsvg svg{max-width:100%;height:auto}
+.vizloading,.vizerr{padding:18px;font-size:13px;color:var(--sub);text-align:center}
+.vizerr{color:#ff9b9b}
+.vizraw{background:#060912;border:1px solid var(--line);border-radius:8px;padding:12px;font-size:12px;color:#9fb0d8;white-space:pre-wrap;word-break:break-word;margin-top:10px;max-height:300px;overflow:auto}

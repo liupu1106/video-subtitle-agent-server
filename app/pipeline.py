@@ -396,6 +396,65 @@ def llm_bilingual(text, title, api_key, model, src_lang, fallback=None):
     return None
 
 
+def _sanitize_mermaid(s):
+    """清洗 LLM 返回的 Mermaid 文本：去掉 ```mermaid / ``` 代码块包裹与首尾空白。"""
+    s = (s or "").strip()
+    s = re.sub(r"^```(?:mermaid|json)?\s*", "", s)
+    s = re.sub(r"\s*```$", "", s)
+    return s.strip()
+
+
+def llm_visualize(text, title, api_key, model=None, fallback=None):
+    """根据「智能梳理」内容，选最贴切的图型并生成 Mermaid 定义，便于读者快速理解。
+
+    返回 dict: {"type","title","mermaid","caption"} 或 None。
+    type ∈ mindmap(理解图/梳理图) | flowchart/graph(依赖图/流程) | xychart-beta(柱状图)
+          | pie(说明图/构成) | timeline(时间线)。
+    仅用 response_format=json_object（顶层必须是对象），模型返回 {"mermaid": "..."} 结构，
+    避免 llm_bilingual 曾踩过的「json_object 模式返回裸数组 → 解析失败」坑。"""
+    if not api_key:
+        return None
+    system = (
+        "你是信息可视化专家。用户会给你一段视频的「智能梳理」结果（Markdown 文本）。"
+        "请判断这段内容最适合用哪种图来呈现，以便读者快速理解。可选 Mermaid 图型：\n"
+        "- mindmap：内容有主题/层级/分类结构（概念梳理、要点总览）→ 理解图/梳理图\n"
+        "- flowchart（或 graph TD）：内容描述流程、步骤、或事物之间的依赖/因果关系 → 依赖图\n"
+        "- xychart-beta：内容含可量化的对比数值（多个方案的评分、数量对比）→ 柱状图\n"
+        "- pie：内容含占比/构成（部分与整体的关系）→ 说明图\n"
+        "- timeline：内容含时间线/演进/事件顺序 → 时间图\n"
+        "规则：\n"
+        "1) 只选一种最贴切的图型，严禁混用。\n"
+        "2) 用严格 JSON 对象返回，格式："
+        '{"type":"图型名","title":"图的标题","mermaid":"完整 Mermaid 定义（从图型关键字开始，'
+        "如 mindmap 或 xychart-beta 或 graph TD 或 pie 或 timeline；不要外层 markdown 代码块、不要任何解释文字)"
+        '","caption":"一句话说明为什么用这张图帮助理解"}。\n'
+        "3) Mermaid 语法必须合法：节点标识只用字母数字下划线；含中文/空格/特殊字符的文本用双引号包裹；"
+        "mindmap 以 `mindmap\\n  root((核心主题))` 起头；xychart-beta 形如 "
+        "`xychart-beta\\n  title 标题\\n  x-axis [标签1,标签2]\\n  y-axis \"数值\" 0-->100\\n  bar [值1,值2]`；"
+        "不要使用 Mermaid 不支持的全角括号等作语法分隔。\n"
+        "只返回 JSON 对象。"
+    )
+    user = f"视频标题：{title}\n\n==== 智能梳理结果 ====\n{text}\n\n请选择最贴切的图型并生成 Mermaid 定义。"
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    content = llm_with_fallback(api_key, messages, response_format={"type": "json_object"},
+                                max_tokens=4000, preferred=model, fallback=fallback)
+    obj = _parse_json_or_none(content)
+    if not isinstance(obj, dict):
+        return None
+    mermaid = _sanitize_mermaid(obj.get("mermaid") or "")
+    if not mermaid:
+        return None
+    return {
+        "type": (obj.get("type") or "mindmap"),
+        "title": (obj.get("title") or "理解视图"),
+        "mermaid": mermaid,
+        "caption": (obj.get("caption") or ""),
+    }
+
+
 # ---------------------------------------------------------------------------
 # 步骤 4b：通义千问语音识别（Paraformer）做无字幕时的语音转写
 # ---------------------------------------------------------------------------

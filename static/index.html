@@ -158,7 +158,13 @@
             <button data-sec="summary" data-f="xlsx">Excel</button>
             <button data-sec="summary" data-f="pdf">PDF</button>
           </div>
+          <div class="exptoolbar vizbar">
+            <button id="genVizBtn">📊 生成理解视图</button>
+            <button id="hideVizBtn" style="display:none">🙈 隐藏视图</button>
+            <span class="ckhint" id="vizHint">按内容自动选最贴切的图（梳理图/依赖图/柱状图/说明图等），图比文字更易懂</span>
+          </div>
           <div class="md" id="md"></div>
+          <div class="vizbox" id="summaryViz" style="display:none"></div>
         </div>
 
         <div class="tabpane" id="pane-tech" style="display:none">

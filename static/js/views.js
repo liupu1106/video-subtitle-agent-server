@@ -32,6 +32,14 @@ function render(res){
     // 1) 梳理结果
     currentMd = String(res.structured || "");
     $("md").innerHTML = (window.marked ? marked.parse(currentMd) : esc(currentMd));
+    // 重置「理解视图」状态：避免上一个视频的图残留到新视频
+    currentViz = null;
+    (function(){
+      const vb = $("summaryViz"); if(vb){ vb.innerHTML = ""; vb.style.display = "none"; }
+      const gv = $("genVizBtn"); if(gv){ gv.disabled = false; gv.textContent = "📊 生成理解视图"; }
+      const hv = $("hideVizBtn"); if(hv){ hv.style.display = "none"; hv.textContent = "🙈 隐藏视图"; }
+      const vh = $("vizHint"); if(vh){ vh.style.display = ""; }
+    })();
 
     // 2) 原始字幕（分段、带序号，易读）
     const segs = (res.raw_segments && res.raw_segments.length)
@@ -56,6 +64,19 @@ function render(res){
     // 4) 技术提取
     renderTech(res.tech);
     showPane("raw");
+    // 绑定「理解视图」按钮（每次渲染用 .onclick 重新赋值，幂等不重复绑定）
+    const gv = $("genVizBtn");
+    if(gv) gv.onclick = generateSummaryViz;
+    const hv = $("hideVizBtn");
+    if(hv) hv.onclick = ()=>{
+      const b = $("summaryViz"); if(!b) return;
+      const show = (b.style.display === "none");
+      b.style.display = show ? "block" : "none";
+      hv.textContent = show ? "🙈 隐藏视图" : "👁 显示视图";
+      // 若展开但没有内容（之前隐藏时可能被清空），用缓存的 spec 重渲染
+      if(show && currentViz && !b.querySelector(".vizsvg") && !b.querySelector(".vizerr") && !b.querySelector(".vizloading"))
+        renderSummaryViz(currentViz);
+    };
   }catch(e){
     // 任一处渲染异常都不应让整页变空白：原样展示报错并保留批量列表入口
     showErr("结果渲染失败：" + (e && e.message ? e.message : e) + "（结果数据可能不完整，建议重新解析该视频）");
@@ -142,6 +163,86 @@ function buildTechHtml(tech){
 }
 
 function renderTech(tech){ $("tech").innerHTML = buildTechHtml(tech); }
+
+/* ---------------- 理解视图（根据梳理内容自动选图型，Mermaid 渲染） ---------------- */
+let currentViz = null;   // 当前视频已生成的可视化 spec，切 tab / 隐藏后再显示时复用
+
+/* 动态加载 Mermaid（仅一次）；CDN 不可达时回调 err，前端降级展示原始定义 */
+function ensureMermaid(cb){
+  if(window.__vizMermaid){ cb(window.__vizMermaid, null); return; }
+  if(window.__vizMermaidLoading){ setTimeout(()=>ensureMermaid(cb), 300); return; }
+  window.__vizMermaidLoading = true;
+  const s = document.createElement("script");
+  s.src = "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js";
+  s.onload = ()=>{
+    try{
+      window.__vizMermaid = window.mermaid;
+      window.__vizMermaid.initialize({ startOnLoad:false, securityLevel:"loose" });
+    }catch(e){}
+    window.__vizMermaidLoading = false;
+    cb(window.__vizMermaid || null, null);
+  };
+  s.onerror = ()=>{ window.__vizMermaidLoading = false; cb(null, new Error("Mermaid 脚本加载失败（需联网）")); };
+  document.head.appendChild(s);
+}
+
+/* 点击「生成理解视图」：把当前梳理内容发给后端，按情境自动选图 */
+function generateSummaryViz(){
+  const btn = $("genVizBtn"), box = $("summaryViz"), hint = $("vizHint");
+  const md = String((currentResult && currentResult.structured) || "").trim();
+  if(!md){ showErr("当前没有可可视化的梳理内容（该视频可能未用 AI 梳理，或内容为空）"); return; }
+  let apiKey = "";
+  try{ apiKey = localStorage.getItem("vsb_apikey") || ""; }catch(e){}
+  // 不在此拦截：若 localStorage 为空但服务端配了 SERVER_API_KEY，后端仍可用；
+  // 缺 Key 时由后端返回 400 并提示，避免「已配 Key 却误报未填」。
+  btn.disabled = true; btn.textContent = "⏳ 生成中…";
+  hint.style.display = "none";
+  box.style.display = "block";
+  box.innerHTML = '<div class="vizloading">🧠 正在根据内容生成最适合的理解视图…</div>';
+  const payload = { text: md, title: (currentResult && currentResult.title) || "", api_key: apiKey };
+  fetch("/api/visualize", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload) })
+    .then(r => r.json().then(d => ({ ok:r.ok, d })))
+    .then(({ ok, d })=>{
+      if(!ok) throw new Error(d.detail || "生成失败");
+      currentViz = d;
+      renderSummaryViz(d);
+      btn.disabled = false; btn.textContent = "🔄 重新生成视图";
+      $("hideVizBtn").style.display = "";
+    })
+    .catch(err=>{
+      btn.disabled = false; btn.textContent = "📊 生成理解视图";
+      box.style.display = "block";
+      box.innerHTML = '<div class="vizerr">⚠️ 生成失败：' + esc(err.message || String(err)) + '</div>';
+    });
+}
+
+/* 把后端返回的 spec 渲染成图；失败则降级展示原始 Mermaid 文本，绝不丢功能 */
+function renderSummaryViz(d){
+  const box = $("summaryViz");
+  if(!box) return;
+  const title = d.title || "理解视图";
+  const cap = d.caption || "";
+  ensureMermaid((mermaid, err)=>{
+    if(err || !mermaid){
+      box.innerHTML = '<div class="vizerr">⚠️ 图表库加载失败（需联网加载 Mermaid）：' + esc(err ? err.message : "") + '</div>'
+        + '<pre class="vizraw">' + esc(d.mermaid || "") + '</pre>';
+      return;
+    }
+    try{
+      const id = "viz" + Date.now();
+      mermaid.render(id, d.mermaid).then(({ svg })=>{
+        box.innerHTML = '<div class="vizhead">📈 ' + esc(title) + ' <span class="viztype">[' + esc(d.type || "") + ']</span></div>'
+          + (cap ? '<div class="vizcap">' + esc(cap) + '</div>' : '')
+          + '<div class="vizsvg">' + svg + '</div>';
+      }).catch(e=>{
+        box.innerHTML = '<div class="vizerr">⚠️ 图表渲染失败（模型生成的 Mermaid 语法可能有误）：' + esc(e && e.message ? e.message : String(e)) + '</div>'
+          + '<pre class="vizraw">' + esc(d.mermaid || "") + '</pre>';
+      });
+    }catch(e){
+      box.innerHTML = '<div class="vizerr">⚠️ 图表渲染异常：' + esc(String(e)) + '</div><pre class="vizraw">' + esc(d.mermaid || "") + '</pre>';
+    }
+  });
+}
 
 function showPane(tab){
   activeTab = tab;
