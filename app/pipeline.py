@@ -167,14 +167,8 @@ def download_audio(url, workdir):
     # 有 ffmpeg 时统一转 16k 单声道 wav 供识别使用；超长则裁剪到上限
     max_sec = int(os.environ.get("MAX_AUDIO_SEC", "7200"))
     if shutil.which("ffmpeg"):
-        wav = out / "audio.wav"
-        cmd = (
-            f'ffmpeg -y -i "{src}" -ar 16000 -ac 1 -c:a pcm_s16le '
-            f'-t {max_sec} "{wav}" -loglevel error'
-        )
-        os.system(cmd)
-        if wav.exists() and wav.stat().st_size > 0:
-            return wav
+        # 合并「抽取音频+静音切除+解码为 PCM」为单次 ffmpeg，直接产 .pcm 供实时 ASR
+        return _prepare_pcm(src, out, max_sec)
     # 无 ffmpeg（云函数环境常见）：保留原始容器格式，扩展名必须与真实编码一致，
     # 否则识别服务按扩展名解码会报 DECODE_ERROR
     return src
@@ -190,15 +184,9 @@ def transcode_for_asr(src, workdir):
     workdir.mkdir(parents=True, exist_ok=True)
     max_sec = int(os.environ.get("MAX_AUDIO_SEC", "7200"))
     # 用户上传的文件名可能带中文/空格，输出到独立文件名避免 ffmpeg 解析出错
-    wav = workdir / "upload.wav"
     if shutil.which("ffmpeg"):
-        cmd = (
-            f'ffmpeg -y -i "{src}" -ar 16000 -ac 1 -c:a pcm_s16le '
-            f'-t {max_sec} "{wav}" -loglevel error'
-        )
-        os.system(cmd)
-        if wav.exists() and wav.stat().st_size > 0:
-            return wav
+        # 合并「抽取音频+静音切除+解码为 PCM」为单次 ffmpeg，直接产 .pcm 供实时 ASR
+        return _prepare_pcm(src, workdir, max_sec)
     return src
 
 
@@ -801,21 +789,57 @@ async def _realtime_ws_parallel(api_key, model, parts, job_id, sem=None):
     return out
 
 
+def _prepare_pcm(src, workdir, max_sec):
+    """把任意音视频源一次性转成 16k 单声道裸 PCM（可选静音切除），供实时 ASR 使用。
+
+    关键提速：把「抽取音频」+「静音切除」+「解码为 PCM」合并为单次 ffmpeg 调用，
+    省掉原流程里 抽 wav → 静音切除 → 再解码 PCM 的两次串行 ffmpeg 开销（长视频可省
+    数十秒 CPU 与一次整文件磁盘读写）。返回 .pcm 路径；失败时退回原文件 src，由
+    _realtime_asr 兜底再处理（行为不退步）。"""
+    import tempfile
+    out = tempfile.mktemp(suffix=".pcm", dir=str(workdir))
+    do_silence = os.environ.get("ASR_SILENCE_REMOVE", "1") not in ("0", "false", "no")
+    cmd = ["ffmpeg", "-y", "-i", str(src)]
+    if do_silence:
+        cmd += ["-af", ("silenceremove=start_periods=1:stop_periods=-1:"
+                        "start_duration=0.3:stop_duration=0.5:"
+                        "start_threshold=-35dB:stop_threshold=-35dB")]
+    cmd += ["-ar", "16000", "-ac", "1", "-f", "s16le", "-loglevel", "error"]
+    # 仅当 max_sec 为有效正数时追加时长裁剪；否则 ffmpeg 收到 "-t None/0" 会直接失败，
+    # 导致整段预处理静默回退为「未处理原文件」（吃掉静音切除+转码提速）。
+    if max_sec and float(max_sec) > 0:
+        cmd += ["-t", str(int(float(max_sec)))]
+    cmd += [out]
+    try:
+        p = subprocess.run(cmd, capture_output=True, timeout=600)
+        if p.returncode == 0 and Path(out).stat().st_size > 0:
+            return out
+    except Exception:
+        pass
+    try:
+        os.unlink(out)
+    except Exception:
+        pass
+    return src
+
+
 def _remove_silence(wav_path):
     """ffmpeg 静音切除：去掉 >=0.5s 的静音/停顿段，压缩有效语音时长，缩短实时识别耗时。
 
-    返回切除后的临时 wav 路径；失败时回退原路径（不阻断主流程）。"""
+    直接输出裸 16k 单声道 s16le PCM（.pcm），把「静音切除」与「解码为 PCM」合并为单次
+    ffmpeg 处理，省掉原流程里静音切除(wav)→再解码(pcm)的第二次串行 ffmpeg 开销。
+    返回 .pcm 路径；失败时回退原 wav 路径（不阻断主流程）。"""
     import tempfile
-    out = tempfile.mktemp(suffix=".wav")
+    out = tempfile.mktemp(suffix=".pcm")
     try:
         p = subprocess.run(
             ["ffmpeg", "-y", "-i", str(wav_path),
              "-af", ("silenceremove=start_periods=1:stop_periods=-1:"
                      "start_duration=0.3:stop_duration=0.5:"
                      "start_threshold=-35dB:stop_threshold=-35dB"),
-             "-ar", "16000", "-ac", "1", "-loglevel", "error", out],
+             "-ar", "16000", "-ac", "1", "-f", "s16le", "-loglevel", "error", out],
             capture_output=True, timeout=300)
-        if p.returncode == 0 and Path(out).stat().st_size > 44:
+        if p.returncode == 0 and Path(out).stat().st_size > 0:
             return out
     except Exception:
         pass
@@ -826,6 +850,14 @@ def _remove_silence(wav_path):
     return wav_path
 
 
+def _load_pcm(path):
+    """读取 16k 单声道 s16le PCM 字节：.pcm 裸流直接读，其它(wav/容器)用 ffmpeg 解码。"""
+    p = Path(path)
+    if p.suffix.lower() == ".pcm":
+        return p.read_bytes()
+    return _realtime_pcm(path)
+
+
 def _realtime_asr(api_key, model, wav_path, job_id=None):
     """实时 ASR（含并行分块加速）：长音频切 N 块并发识别，总耗时≈单块时长。
 
@@ -833,16 +865,21 @@ def _realtime_asr(api_key, model, wav_path, job_id=None):
     会话（账号并发硬上限 ASR_MAX_CONCURRENCY，实测 20 路），即可把整段识别时间从「音频
     时长」压到「单块时长」(≈ 音频时长/N)。一小时视频(3600s)切 20 块→单块 180s，20 路
     并发≈180s；叠加静音切除(ASR_SILENCE_REMOVE)压缩有效语音后，典型可压到 3 分钟内。
-    异步文件转录本账号不可用（qwen-audio-3.0-asr-flash url error、paraformer-v2 配额耗尽）。"""
+    优化点：① 抽取音频+静音切除+PCM 解码合并为单次 ffmpeg(_prepare_pcm)，省掉原
+    抽 wav→再静音切除→再解码 PCM 的两次串行 ffmpeg 开销；② 单块下限 ASR_MIN_CHUNK_SEC
+    调小（默认 10s）让中短视频也能用满 20 路并发；③ 切片重叠 ASR_OVERLAP_SEC 调小
+    （默认 0.4s）减少重复识别量；④ 三处 LLM 调用并发执行。异步文件转录本账号不可用。"""
     max_conc = max(1, int(os.environ.get("ASR_MAX_CONCURRENCY", "20")))
-    min_chunk = max(10, int(os.environ.get("ASR_MIN_CHUNK_SEC", "20")))
+    min_chunk = max(6, int(os.environ.get("ASR_MIN_CHUNK_SEC", "10")))
+    overlap = float(os.environ.get("ASR_OVERLAP_SEC", "0.4"))
     do_silence = os.environ.get("ASR_SILENCE_REMOVE", "1") not in ("0", "false", "no")
-    if do_silence:
+    if do_silence and not str(wav_path).lower().endswith(".pcm"):
+        # 上游(_prepare_pcm / B站下载)已做静音切除并直接输出 .pcm，则跳过，避免二次切除把语音切得更碎
         try:
             wav_path = _remove_silence(wav_path)
         except Exception:
             pass
-    pcm = _realtime_pcm(wav_path)
+    pcm = _load_pcm(wav_path)
     if not pcm:
         raise RuntimeError("音频解码为 PCM 失败，无法实时识别")
     dur = len(pcm) / (16000 * 2)
@@ -857,7 +894,7 @@ def _realtime_asr(api_key, model, wav_path, job_id=None):
         except Exception:
             pass
     sem = asyncio.Semaphore(max_conc)
-    parts = _split_pcm_overlap(pcm, n)
+    parts = _split_pcm_overlap(pcm, n, overlap_sec=overlap)
     texts = asyncio.run(_realtime_ws_parallel(api_key, model, parts, job_id, sem))
     return "\n".join(t for t in texts if t).strip()
 

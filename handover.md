@@ -1,296 +1,336 @@
-# 视频字幕提取与智能梳理 —— 项目 Handover
+# 视频字幕提取与智能梳理 —— 项目 Handover（最新版）
 
-> 交接时间：2026-08-28 23:0x
-> 当前状态：**生产可用**（CloudBase 云托管常驻容器，公网可访问）
-> 一句话：输入 B 站视频/番剧/选集链接 → 自动提取字幕（无字幕则语音转写）→ AI 生成「梳理结果 / 技术提取 / 中英文对照」→ 单集或整批查看、四分区六格式导出。
+> 交接时间：2026-08-30
+> 文档状态：覆盖截至 2026-08-30 的全部已实现功能、坑与后续方向。**旧版 handover.md（2026-08-28）已过时，以本版为准。**
+> 当前代码 HEAD：`ec04855`（GitHub `master` 已同步）。
+> 一句话概览：输入 B 站视频/番剧/选集链接或本地音视频 → 优先提取字幕（无字幕则 20 路并发语音转写 + 静音切除，1 小时视频约 3 分钟内）→ 通义千问 AI 生成「梳理结果 / 技术提取 / 中英文对照」→ 单集或整批查看、四分区六格式导出。
+
+---
+
+## 0. ⚠️ 先读：线上部署已落后于代码
+
+- **CloudBase 线上域名 `https://video-subtitle-304233-9-1475154132.sh.run.tcloudbase.com` 是旧部署**（约 2026-08-28 构建），**缺少**之后所有改动：ASR 提速（并行分块+静音切除）、三个模型下拉框（`/api/models`）、`settings` 页旧模型选择框移除、以及刚修的「模型面板被 CSS 隐藏」bug。线上目前连下拉框的 HTML 都没有。
+- **真正的「最新版本」在本地服务 `http://127.0.0.1:8000`**（沙箱内常驻进程，已验证返回 `ec04855` 的页面与 `/api/models`）。
+- 结论：要让线上与代码一致，必须**重新部署 CloudBase**（见 §2.2）。沙箱环境无法直接部署（无 CloudBase CLI + 网络受限），需在本机执行。
 
 ---
 
 ## 1. 快速上手
 
-### 线上地址
-- 生产（CloudBase 云托管，公网直连、无令牌）：
-  `https://video-subtitle-304233-9-1475154132.sh.run.tcloudbase.com`
-- 健康检查：`GET /api/health` → `{"status":"ok","has_server_key":false}`
-
-### 本地运行（当前主力方式）
+### 1.1 本地运行（本机/非沙箱主力方式）
 
 一键启动（推荐）：
 ```bash
 cd video-subtitle-agent-server
-./run_local.sh              # 默认 8000 端口，前台运行，Ctrl+C 停止
-PORT=9000 ./run_local.sh    # 换端口
-./stop_local.sh             # 停止
+./run_daemon.sh          # 内部先建 venv + 离线装依赖(vendor/wheels) + unset 代理 + 启动 uvicorn
+# 或 macOS 双击 start_local.command / 用 run_local.sh
 ```
-脚本自动完成：Python 依赖自检 → `ffmpeg` 检查 → **加载 `.env`** → 端口占用检查 → 启动 uvicorn。
+`run_daemon.sh` 会自动完成：Python 依赖自检 → 优先 `vendor/wheels` 离线安装 → **加载 `.env`** → `unset` 所有代理变量（强制后端直连外网）→ 启动 uvicorn（`127.0.0.1:8000`）。
 
 手动启动：
 ```bash
 cd video-subtitle-agent-server
-pip3 install -r requirements.txt     # 本机 pip 装大包易 OOM(exit 137)，见「坑」章节
-set -a; . ./.env; set +a             # 关键：uvicorn 不会自动读 .env，必须手动注入
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+source ./.env                       # 关键：uvicorn 不自动读 .env，必须手动注入
+venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-**坑：uvicorn / FastAPI 不会自动加载 `.env`**。不注入环境变量时 `DASHSCOPE_API_KEY` 为空，
-表现为「服务能起、页面能开，但 AI 梳理降级为规则清洗、语音转写不可用」。
-用 `/api/health` 的 `has_server_key` 可快速判断 Key 是否真的生效。
+**关键坑（必看）**：
+- **uvicorn / FastAPI 不会自动加载 `.env`**。不注入时 `DASHSCOPE_API_KEY` 为空，表现为「服务能起、页面能开，但语音转写不可用、AI 梳理降级为规则清洗」。用 `GET /api/health` 的 `has_server_key` 判断 Key 是否真的生效。
+- **后端必须直连外网，禁用本地代理**：`api.bilibili.com` / `dashscope.aliyuncs.com` 直连可达（<0.3s），但沙箱/系统代理端口动态变化（56699→59225）且常失效，`requests` 走代理会 `ProxyError`。`run_daemon.sh` 已 `unset` 全部代理变量；改启动逻辑时**切勿重新引入代理**。
+- `REDIS_URL` 留空 → store 自动降级 **MemoryBackend**（单进程内存）。重启服务任务状态即清空，但浏览器 localStorage 缓存仍可查看/导出已完成任务。
+- 需要系统级 `ffmpeg`（Dockerfile 与本地均依赖它做 16k 单声道 wav 与静音切除）。
+- 任务失败 `status` 为 `"error"`（**不是** `failed`）；前端已正确处理，外部轮询脚本要覆盖这个值。
 
-本地模式要点：
-- `REDIS_URL` 留空 → store 自动降级 **MemoryBackend**（单进程内存）。重启服务任务状态即清空，
-  但浏览器 localStorage 缓存仍可查看/导出已完成任务。
-- 需要系统级 `ffmpeg`（本机 `/usr/local/bin/ffmpeg` 8.1.1 已验证可用）。
-- 任务失败时 `status` 为 `"error"`（**不是** `failed`）；前端已正确处理（提示错误并重置），
-  外部脚本轮询时要记得覆盖这个状态值。
+### 1.2 部署到 CloudBase 云托管（本机无需 Docker，云端构建）
 
-本地链路实测结论（2026-08-29）：
-- 上传自有音频 → ffmpeg 处理 → DashScope 上传 → ASR 提交 → 轮询返回，**全链路跑通**。
-- **fun-asr 配额可用**：`paraformer-v2` 报无配额后自动回退 `fun-asr` 并成功提交，
-  多模型回退机制在真实环境验证生效（详见「语音识别」章节）。
-- B 站解析：给定**具体视频链接**的 `view` 接口可用；但本机 IP 对 B 站**排行榜/搜索**接口被风控
-  （返回 `-352` / HTTP 412）。若解析或下载报风控，在页面填入 B 站 Cookie 即可绕过。
-- 注意 `/api/resolve` 对失效 BV 号会返回 `error: "'data'"`（`KeyError`），
-  这是链接本身无效（B 站 `view` 返回 `-404 啥都木有`），不是服务故障——换有效链接即可。
-
-### 部署（本机无需 Docker，云端构建）
 ```bash
-# 登录（环境 API Key，非交互、仅限该环境）
-cloudbase login --cloudbase-api-key <Key> -e dev-d2gldfbb91a93f3e6
-
-# 部署（非交互必须用 stdin 喂回车，否则卡在灰度确认）
+# 仅限该环境的 API Key 登录（非交互、安全，不能动账号其他资源）
+cloudbase login --cloudbase-api-key <环境APIKey> -e dev-d2gldfbb91a93f3e6
+# 非交互必须喂回车（否则卡在灰度确认）；--port 不是 -p
 printf '\n' | cloudbase cloudrun deploy --source . -s video-subtitle \
   --port 8000 -e dev-d2gldfbb91a93f3e6 --wait --force
 ```
 - 环境 ID：`dev-d2gldfbb91a93f3e6`，服务名：`video-subtitle`，端口 `8000`。
-- 当前运行模式 `alwaysScale`（常驻），不会 scale-to-0 中断批量任务。
+- 云托管默认不配变量也能启动（无 Key → 降级规则清洗）。要开通真实识别/梳理，在控制台「配置 → 环境变量」加 `DASHSCOPE_API_KEY`，**建议先到 DashScope 控制台轮换一次 Key**。
+- 长期建议把「最小实例数」设为 1（避免 scale-to-0 打断批量长任务），或多副本必须配 `REDIS_URL`。
+
+### 1.3 代码仓库与提交规范（重要）
+
+- **项目独立 git 仓库**在 `video-subtitle-agent-server/.git`（master 分支）。**切勿在 `/Users/liupu` 级仓库提交**——那里是误 `git init` 留下的 home 级仓库，根目录为用户 home，提交会泄露 `.ssh`/`.aws`/`.netrc`/个人文件。
+- **GitHub 远程**：`git@github.com:liupu1106/video-subtitle-agent-server.git`（私有库）。
+- **本沙箱推 GitHub 必须用 SSH 部署密钥**：HTTPS 被本地代理拦截 git 端点（`api.github.com` 通但 `github.com/<repo>.git` 智能 HTTP 端点不通，直连 443 超时），仅 SSH 22 端口直连可达。部署私钥在项目内 `.ssh_deploy/id_ed25519`（**已 gitignore，绝不入仓**）。推送命令：
+  ```bash
+  GIT_SSH_COMMAND="ssh -i .ssh_deploy/id_ed25519 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no" \
+    git push -u origin master
+  ```
+- **用户本机终端无此代理，可用 HTTPS 直推**（本机需 `git remote set-url origin https://github.com/liupu1106/video-subtitle-agent-server.git`）。
+- `.gitignore` 已排除：`.env`、`venv/`、`__pycache__`、`*.log`、`.DS_Store`、`.ssh_deploy/`。`vendor/wheels/` 是离线依赖包，属项目资产应纳入版本库（CloudBase 无外网部署用）。
 
 ---
 
 ## 2. 架构与技术栈
 
 ```
-浏览器(static/index.html, 单文件 SPA)
+浏览器(static/index.html, 单文件 SPA, 无构建步骤)
    │  REST
-FastAPI (app/main.py)  ──►  threading 后台任务
+FastAPI (app/main.py)  ──►  daemon 线程后台任务（run_pipeline）
    │
-   ├── app/pipeline.py   yt-dlp 取字幕 / ffmpeg 抽音频 → DashScope ASR → DashScope LLM(qwen)
+   ├── app/pipeline.py   yt-dlp 取字幕 / ffmpeg 抽音频 → DashScope 实时 ASR(并行分块+静音切除) → 通义千问 LLM(qwen-plus 系列)
    ├── app/bilibili.py   B 站番剧分集 / UGC 多分P 解析
-   ├── app/store.py      任务状态存储（Memory / Redis）
-   └── 导出：txt/srt/md/json（标准库）、xlsx（openpyxl）、pdf（reportlab CID 中文字体）
+   ├── app/store.py      任务状态存储（Memory / Redis）+ 限流计数
+   └── 导出：txt/srt/md/json（手写序列化）+ xlsx(openpyxl) + pdf(reportlab, STSong-Light 中文 CID 字体)
 ```
 
-**关键设计：前端 localStorage 缓存解耦后端拓扑**
-结果在任务完成时缓存到浏览器（key `vsb_res_<jobId>`），「查看 / 导出 / 整批查看」优先读缓存。
-这样即使云托管多副本、缩容重启，用户侧依然稳定可用——这是本项目的核心容错手段（详见「坑」）。
+**核心设计：前端 localStorage 缓存解耦后端拓扑**
+结果在任务完成时缓存到浏览器（key `vsb_res_<jobId>`），「查看 / 导出 / 整批查看」优先读缓存。即使云托管多副本、缩容重启，用户侧仍稳定可用——这是项目核心容错手段。
 
 ### 目录
 | 文件 | 作用 |
 |---|---|
-| `app/main.py` | API 路由、批量调度、导出序列化、限流 |
-| `app/pipeline.py` | 主流程编排、字幕/音频/ASR/LLM |
+| `app/main.py` | API 路由、批量调度、导出序列化、限流、no-store 中间件、静态挂载 |
+| `app/pipeline.py` | 主流程编排；字幕/音频/ASR 并行加速/LLM；模型列表与自动回退 |
 | `app/bilibili.py` | B 站番剧 `get_season_episodes`、选集 `get_video_pages` |
-| `app/store.py` | 任务存储（内存 / Redis），`_get_batch` 会内联 done 子任务 result |
-| `static/index.html` | 页面骨架：左侧导航 + 右侧 5 个页面容器（无构建步骤） |
-| `static/css/base.css` | 设计变量、reset、通用组件（表单/按钮/卡片/标签/提示） |
-| `static/css/layout.css` | 左侧导航 + 右侧内容区布局、页面切换、窄屏响应式 |
-| `static/css/content.css` | 内容展示：梳理(.md)/字幕(.rawseg)/对照(.biling)/技术(.techcard)/整批(.ovsec)/批量列表 |
-| `static/js/core.js` | 全局状态、工具、`esc`、结果缓存 `vsb_res_*`、错误提示 |
-| `static/js/api.js` | 后端接口唯一出口（process / job / resolve / export） |
-| `static/js/export.js` | 序列化与导出（txt/md/srt/xlsx/pdf）、一键导出、整批导出 |
-| `static/js/views.js` | 渲染与视图切换（render / renderBatch / 整批查看 / 返回） |
-| `static/js/nav.js` | 左侧导航切换 `showPage()`、任务进行中提示点 |
-| `static/js/app.js` | 业务流程（提交 / 轮询 / 链接探测）+ 事件绑定 + 初始化 |
-| `Dockerfile` | `python:3.11-slim` + ffmpeg |
+| `app/store.py` | 任务存储（Memory/Redis）、并发心跳、批量聚合 `_get_batch` |
+| `static/index.html` | 页面骨架：左侧导航 + 右侧 5 个页面（无构建） |
+| `static/css/{base,layout,content}.css` | 设计变量/布局/内容展示样式 |
+| `static/js/{core,api,export,views,nav,app}.js` | 全局状态/接口出口/导出/渲染/导航/业务流程 |
+| `Dockerfile` | `python:3.11-slim` + ffmpeg（云托管云端构建） |
+| `run_daemon.sh` / `run_local.sh` / `start_local.command` | 本地启动器（建 venv、离线装依赖、unset 代理） |
 | `DEPLOY-CLOUDBASE.md` | 部署 runbook |
+| `cloudbaserc.json` | 云托管环境/服务配置 |
+| `.ssh_deploy/` | SSH 部署私钥（gitignore，仅沙箱推 GitHub 用） |
 
-**前端组织约定（重构后）**
+**前端组织约定**
+- 5 个小页面：`page-new` 新建解析 / `page-jobs` 任务进度 / `page-result` 单视频结果 / `page-batch` 整批查看 / `page-settings` 模型与密钥。切换靠 `showPage(id)` 给 `<section class="page">` 加 `.active`。
+- 脚本按 `core → api → export → views → nav → app` 顺序用普通 `<script>` 加载，**刻意不用 ES module**（避老 Safari 模块兼容 + `file://` CORS），共享全局作用域。
+- **坑：`app/main.py` 必须先挂载 `/static` 再挂载 `/`**。`StaticFiles` 挂 `/` 会吞掉其余路径，否则 `/static/css/base.css` 被解析成 `static/static/css/base.css` 而 404（页面能开但无样式无脚本）。
+- 全部响应带 `no-store`（main.py 中间件）+ `<head>` 三个 no-cache meta，防浏览器缓存旧页面。
 
-- 界面：左侧固定导航栏 + 右侧内容区；内容拆为 5 个小页面 ——
-  `page-new` 新建解析 / `page-jobs` 任务进度 / `page-result` 单视频结果 / `page-batch` 整批查看 / `page-settings` 模型与密钥。
-  切换靠 `showPage(id)` 给 `<section class="page">` 加 `.active`（见 `static/js/nav.js`）。
-- 脚本按 `core → api → export → views → nav → app` 顺序用普通 `<script>` 加载，
-  **刻意不用 ES module**：避免老 Safari 的模块兼容与 `file://` CORS 问题，全部共享全局作用域。
-- **坑：`app/main.py` 必须先挂载 `/static` 再挂载 `/`**。因为 `StaticFiles` 挂载在 `/` 会吞掉其余路径，
-  若不先注册 `/static`，`/static/css/base.css` 会被解析成 `static/static/css/base.css` 而 404
-  （表现为页面能打开但完全没样式、没脚本）。
-- 默认模型为 **qwen-max**（`static/index.html` 中 `<select id="model">` 的首个 option）。
+---
 
-### API
+## 3. API 一览
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/health` | 健康检查、`has_server_key` |
-| GET | `/api/resolve?url=` | 探测链接可否批量，返回 `items:[{index,title,duration}]` |
-| POST | `/api/process` | 提交任务；`batch=true` + `selected:[i,...]` 走批量子集 |
-| POST | `/api/upload` | 上传本地音视频 |
+| GET | `/api/models` | **返回前端下拉框可用模型** `{asr:[...], llm:[...], fallback:[asr∪llm 去重]}` |
+| GET | `/api/resolve?url=` | 探测能否批量，返回 `{kind, is_multi, count, title, items:[{index,title,duration,page?}]}` |
+| POST | `/api/process` | 提交任务；支持 `batch`+`selected:[i]` 批量子集；新增 `asr_model`/`llm_model`/`fallback_model` 三参数 |
+| POST | `/api/upload` | 上传本地音视频（同样接收上述三模型参数） |
 | GET | `/api/job/{id}` | 轮询状态（批量返回 `children[]`，done 子任务**内联 result**） |
-| GET | `/api/job/{id}/export` | 单分区导出 `?section=raw|summary|tech|bilingual&format=txt|srt|md|json|xlsx|pdf` |
-| POST | `/api/export-all` | 打包 14 个文件为 zip（命名 `视频名_页面名称.格式`） |
+| GET | `/api/job/{id}/export?section=&format=` | 单分区导出 `section=raw\|summary\|tech\|bilingual`；`format=txt\|srt\|md\|json\|xlsx\|pdf` |
+| POST | `/api/export-all` | 打包 14 文件 zip（优先用 `job_id` 取结果，绕过代理请求体大小限制；失败回退前端已缓存 `result`） |
 
-### 环境变量（控制台「服务配置 → 环境变量」）
+**模型三参数语义**（`/api/process`、`/api/upload` 均可传）：
+- `asr_model`：语音识别首选模型（留空=后端走 `REALTIME_ASR_MODELS` 默认顺序）。
+- `llm_model`：AI 梳理/翻译首选文本模型（留空=后端走 `LLM_MODELS`）。
+- `fallback_model`：统一备选（跨语音+文本），当首选不可用置候选末尾。
+- 任一模型「未开通/额度耗尽/过期」都自动跳下一个（见 §6.3）。
+
+---
+
+## 4. 环境变量（控制台「服务配置 → 环境变量」或本地 `.env`）
+
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `DASHSCOPE_API_KEY` | 空 | ASR + qwen 共用；不配则 ASR 不可用、AI 梳理降级为规则清洗 |
-| `REDIS_URL` | 空 | 配了走 Redis（多副本共享）；不配走内存（**仅单副本可用**） |
+| `DASHSCOPE_API_KEY` | 空 | ASR + 通义千问共用；不配则 ASR 不可用、AI 梳理降级为规则清洗 |
+| `REDIS_URL` | 空 | 配了走 Redis（多副本共享、自愈并发计数）；不配走内存（**仅单副本可靠**） |
 | `IP_LIMIT_PER_HOUR` | 20 | 单 IP 每小时提交上限 |
 | `GLOBAL_CONCURRENCY` | 4 | 全服务并行任务上限（超限 429） |
-| `BATCH_CONCURRENCY` | 6 | 批量子任务并发 |
+| `BATCH_CONCURRENCY` | 6 | 整季/整集内并行子任务数上限 |
 | `MAX_AUDIO_SEC` | 7200 | 音频处理长度上限（秒），超长裁剪 |
-| `ASR_MODEL` | `paraformer-v2` | 语音识别首选模型（回退链起点） |
-| `LLM 模型` | 页面下拉 `qwen-plus` | 也可 `qwen-turbo` / `qwen-max` |
+| `ASR_MAX_CONCURRENCY` | 20 | **实时 ASR 并发硬上限**（实测=账号上限，超出触发 `Throttling.RateQuota`）；提速核心 |
+| `ASR_MIN_CHUNK_SEC` | 20 | 单块时长下限（秒）；块数 = `min(并发上限, 时长/单块下限)`，用满并发 |
+| `ASR_SILENCE_REMOVE` | 1 | 静音切除开关（去 ≥0.5s 静音，压缩有效语音→提速且省按时长计费的识别量） |
+| `ASR_MODEL_PRIORITY` | 空 | 逗号分隔，覆盖 ASR 模型默认顺序（**快到期优先**：把将过期的写前面） |
+| `LLM_MODEL_PRIORITY` | 空 | 逗号分隔，覆盖文本模型默认顺序（快到期优先） |
+| `JOB_TTL_SEC` | 86400 | 任务快照 TTL |
+| `JOB_STALE_SEC` | 900 | 心跳超时判定任务中断的阈值 |
+
+**模型默认值（代码内，非环境变量）**
+- `REALTIME_ASR_MODELS = [fun-asr-mtl-realtime, fun-asr-realtime, qwen-audio-3.0-asr-flash-streaming, fun-asr-flash-8k-realtime]`（默认首选 `fun-asr-mtl-realtime`）。
+- `LLM_MODELS = [qwen3.5-plus, qwen3.6-plus, qwen3.7-plus]`（快到期优先，默认首选 `qwen3.5-plus`）。
+- 老接口兜底 `ASR_FILE_MODELS = [paraformer-v2, fun-asr]`（仅实时都不可用时走老文件转录，需 OSS 直传）。
+- 旧文档写的 `ASR_MODEL=paraformer-v2` / 默认 `qwen-max` **已废弃**，现在模型选择下放到页面三下拉框。
 
 ---
 
-## 3. 已实现功能
+## 5. 已实现功能（截至 2026-08-30）
 
 **输入**
-- B 站单视频、番剧（bangumi）、UGC 多分P 选集链接；本地音视频上传。
-- 粘贴链接即自动探测（`/api/resolve`），识别到多分集自动启用批量开关并显示分集数。
+- B 站单视频、番剧（bangumi）、UGC 多分P 选集；本地音视频上传。
+- 粘贴链接即 `/api/resolve` 探测，识别多分集自动启用批量并显示分集数。
 
 **处理流程**
-1. 优先提取官方字幕（yt-dlp 字幕轨道）→ `method=subtitle`
-2. 无字幕则 ffmpeg 抽音频转 16k 单声道 wav → DashScope 语音转写 → `method=asr`
-3. 文本清洗 → **三个 LLM 调用并发**（`ThreadPoolExecutor(max_workers=3)`）：
-   - `llm_refine` 梳理结果（Markdown）
-   - `llm_tech_extract` 技术提取（技术/功能/国产化等结构化 JSON）
-   - `llm_bilingual` 中英文对照
+1. 优先提取官方字幕（yt-dlp 字幕轨道）→ `method=subtitle`。
+2. 无字幕则 ffmpeg 抽 16k 单声道 wav → **DashScope 实时 ASR（并行分块 + 静音切除加速）** → `method=asr`。
+3. 文本清洗 → **三个 LLM 调用并发**（`ThreadPoolExecutor(max_workers=3)`）：`llm_refine` 梳理（MD）、`llm_tech_extract` 技术提取（结构化 JSON）、`llm_bilingual` 中英文对照。
+
+**ASR 提速（2026-08-29 加入，核心优化）**
+- 实测账号实时 ASR **并发硬上限 = 20 路**（`Throttling.RateQuota`）。实时接口服务端≈实时，单流不能快于音频时长；唯一杠杆是切片并发。
+- `_realtime_asr`：块数 `n = min(ASR_MAX_CONCURRENCY, 时长 // ASR_MIN_CHUNK_SEC)`，用满 20 路；相邻块 1.5s 重叠避免切词；`asyncio.Semaphore(20)` 封顶防限流。
+- `_remove_silence`（ffmpeg silenceremove）压缩有效语音——既提速又省识别量（实时 ASR 按时长计费，性价比双赢）。
+- 实测：600s 音频 34s（原 150s，提速 4.4x）；**一小时视频最快 ≈ 有效语音时长/20**，纯语音临界 3 分钟，含 30% 静音约 128s。要严格所有视频 <3 分钟需提 DashScope 并发配额 >20 路。
+- 静音切除后时间戳基于压缩时间轴，与原视频位置略有偏移（内容正确，未做时间映射）。
+
+**模型选择（2026-08-30 加入）**
+- 前端「🚀 新建解析」页三个动态下拉框（**刚修复 CSS 显隐，已常驻可见**）：
+  - `🎙 语音识别模型`（`asrModel`）→ 由 `/api/models` 的 `asr` 填充。
+  - `💬 文本模型`（`llmModel`）→ `llm` 填充。
+  - `🔁 替代模型`（`fallbackModel`）→ `asr∪llm` 并集填充。
+  - 每个首个占位「自动/不指定」；留空则后端按默认列表自动回退。
+- `fillModelSelects()` 初始化时 `fetch /api/models` 填充；接口不可达则保留占位仍可提交。
+- 后端 `run_pipeline(asr_model, llm_model, fallback_model)` 透传：`do_asr` 用 asr/回退候选，`llm_*` 步骤用 llm/回退候选。
+- **自动回退**：`dashscope_asr` 候选顺序 = `ASR_MODEL环境变量 > asr_model > REALTIME_ASR_MODELS > fallback_model`；任一失败跳下一个。`llm_with_fallback` 同理（首选优先、fallback 置尾、去重）。`settings` 页旧 `qwen-max/plus/turbo` 选择框已删除。
 
 **查看（结果页 4 个分区 tab）**
-- 原始字幕（**按 segment 分段**，左侧带序号）、梳理结果（Markdown 渲染 + 排版增强）、技术提取、中英文对照
-- 单集「查看」、批量列表每集「查看」（带「← 返回批量列表」）
-- **整批查看梳理结果 / 整批查看技术提取**：聚合所有分集，渲染在**当前页**（`#batchView`），非弹窗
+- 原始字幕（按 segment 分段带序号）、梳理结果（MD 渲染）、技术提取、中英文对照。
+- 单集「查看」、批量列表每集「查看」（带「← 返回批量列表」）、**整批查看**（聚合渲染到页面内 `#batchView`，非弹窗）。
 
 **批量**
-- 番剧整季 / UGC 全部分P；可手动勾选子集（全选 / 反选，含实时「已选 x/X」计数）
-- 进度条 + 实时日志；失败行内显示原因（缺 Key 会明确标注）
-- 顶部「整批一键导出全部」打包 zip
+- 番剧整季 / UGC 全部分P；可手动勾选子集（全选/反选，实时「已选 x/X」计数）。
+- 进度条 + 实时日志；失败行内显示原因；`BATCH_CONCURRENCY` 限制季内并发。
+- 顶部「整批一键导出全部」打包 zip。
 
 **导出**
-- 4 分区 × 6 格式；单分区可「复制 / TXT / SRT / Excel / PDF」
-- 批量：每集导出 + 整批一键导出（14 文件 zip：`视频名_页面名称.格式`）
-- 前端本地生成（txt/srt/md/json 手写序列化，xlsx 用 SheetJS，pdf 用 `window.print()`），缓存缺失时回退服务端
+- 4 分区 × 6 格式（txt/srt/md/json/xlsx/pdf）；单分区「复制 / 各格式」。
+- 一键导出 14 文件 zip（分区×格式组合，命名 `视频名_页面名称.格式`）。
+- 由后端 `/api/job/{id}/export` 与 `/api/export-all` 生成（xlsx=openpyxl、pdf=reportlab STSong-Light 中文 CID 字体）；中文文件名用 RFC 5987 `filename*=UTF-8''` 避免 500。前端 `export.js` 组装请求与下载。
 
 **健壮性**
-- 全局 `no-store` 响应头 + `<head>` no-cache meta（防 Safari 缓存旧页面）
-- 渲染全链路 try/catch（`esc` 类型安全、`safeParse` marked 降级、每分集区块独立兜底）
-- 轮询与详情视图互斥守卫（`viewingDetail`），避免相互覆盖
+- 全局 `no-store` + `<head>` no-cache meta（防 Safari 缓存旧页面）。
+- 渲染全链路 try/catch（`esc` 类型安全、`safeParse` 降级、每分集区块独立兜底）。
+- 轮询与详情视图互斥守卫（`viewingDetail`）。
 
 ---
 
-## 4. 遇到的问题与踩到的坑（按类型）
+## 6. 遇到的问题与坑（按类型）
 
-### 4.1 部署 / 平台
-
+### 6.1 部署 / 平台
 | 坑 | 现象 | 解决 |
 |---|---|---|
-| 云托管资源未开通 | `cloudrun deploy` 报「云托管资源未开通」 | CLI **没有**开通命令，必须去控制台：环境 → 云托管 → 开通（首次会建 TCR 命名空间/集群，可能需 CAM 授权）。`cloudrun list` 返回空表也照样失败 |
+| 云托管资源未开通 | `cloudrun deploy` 报「云托管资源未开通」 | CLI 无开通命令，必须去控制台：环境→云托管→开通（首次建 TCR 命名空间/集群，可能需 CAM 授权） |
 | 端口参数 | `-p 8000` 报 unknown option | 必须用 `--port` |
-| 非交互卡死 | 部署卡在「Enable gray deployment?」 | `printf '\n' \| cloudbase cloudrun deploy ...` 喂回车选默认 No |
-| 本机 OOM | deploy 进程 exit 137 | 重试即可；本机内存紧张时 pip 装大包同样会被杀（exit 137），验证改用 stub |
-| EdgeOne 方案被否 | 云函数跑不了长任务 | 最终选 CloudBase 云托管常驻容器，EdgeOne 版无批量能力 |
+| 非交互卡死 | 部署卡「Enable gray deployment?」 | `printf '\n' \| cloudbase cloudrun deploy ...` 喂回车选默认 No |
+| 本机 OOM | deploy / pip 装大包 exit 137 | 重试；本机内存紧张时验证改用 stub |
+| 线上落后于代码 | 线上无下拉框/未提速 | 代码改动后必须**重新部署 CloudBase**（见 §0、§2.2） |
 
-### 4.2 架构 / 分布式（**最重要的一类**）
-
-**核心矛盾：任务状态存在进程内存，而云托管是多副本 + 可缩容到 0。**
-
+### 6.2 云托管 / 分布式（最重要的一类）
+**核心矛盾：任务状态在进程内存，而云托管多副本 + 可缩容到 0。**
 | 坑 | 现象 | 解决 |
 |---|---|---|
-| 首次成功、后续失败 | 「查看 / 导出」第一次正常，第二次起 404 | 根因不在代码逻辑：请求被轮询到**没有该 job 的副本**。修复走前端——任务完成即缓存 result 到 localStorage，查看/导出优先读缓存 |
-| 批量「该分集尚未完成」 | 明明已完成 | 同上；且 `store._get_batch` 现对 done 子任务**内联 `result`**，前端轮询时对每个 done 子任务 `cachePut` |
-| 整批查看「结果暂不可用」 | 弹窗每个分集都不可用 | 轮询命中无状态副本 → `children[].result:null`。改为「缓存即时渲染 + 后台并行补齐（`fillMissingBatch`，25s 超时、逐条渐进刷新）」 |
+| 首次成功、后续 404 | 「查看/导出」第一次正常，第二次起 404 | 请求轮到无该 job 的副本。前端改为任务完成即缓存 result 到 localStorage，查看/导出优先读缓存 |
+| 批量「该分集尚未完成」 | 明明已完成 | `store._get_batch` 对 done 子任务**内联 result**，前端轮询时 `cachePut` |
+| 整批查看「结果暂不可用」 | 每分集都不可用 | 轮询命中无状态副本 → `children[].result:null`；改为「缓存即时渲染 + 后台并行补齐（`fillMissingBatch`）」 |
+> 仍未根治：多副本状态不一致只是被前端缓存绕过。彻底解法：最小实例数=1，或接 Redis（`REDIS_URL`）。
 
-> **仍未根治**：多副本状态不一致只是被前端缓存绕过了。彻底解法见第 6 节（最小实例数=1，或接 Redis）。
-
-### 4.3 后端
-
+### 6.3 本沙箱环境特有的坑（接手本项目大概率会踩）
 | 坑 | 现象 | 解决 |
 |---|---|---|
-| **中文文件名导致导出全 500** | txt/srt/md/json 全部 Internal Server Error | starlette 按 **latin-1** 编码 header，中文标题进 `Content-Disposition` 抛 `UnicodeEncodeError`。改用 RFC 5987：`filename="ascii降级名"; filename*=UTF-8''<percent-encoded>` |
-| 批量导出文件名带更上层名 | 文件名是主标题而非分集名 | `run_pipeline` 加 `ep_title` 参数，批量 `_run_child` 传分集自身 part 名 |
-| DashScope `403 AllocationQuota` | 语音识别提交失败 | **非代码 bug**：该 Key 账号未开通语音识别配额。LLM 与 ASR 是**独立配额**（LLM 能调 ≠ ASR 已开通）。已改为**多模型自动回退** |
-| B 站字幕取不到 | 有字幕的视频也走 ASR | 部分字幕需登录 Cookie（页面可填 `bili_cookie`）；yt-dlp 签名/反爬也会导致回退 ASR |
-| ASR 音频解码失败 | `DECODE_ERROR` | 早期用「本服务公网路由 + file_urls 回拉」，带鉴权域名返回 401 HTML 被当音频解码。改为直传 OSS（`oss://` + `X-DashScope-OssResourceResolve: enable`） |
+| 推 GitHub 被代理拦截 | HTTPS git push `502`/`Empty reply`/`HTTP 000` | 本沙箱出网强制走本地代理，拦截 `github.com/<repo>.git` 端点（仅 `api.github.com` 通）；**改用 SSH 部署密钥**（`.ssh_deploy/`，22 端口直连）。用户本机无代理可 HTTPS |
+| home 级误 git init | `git status` 显示 `../../../` | `/Users/liupu/.git` 是误 init 的 home 仓库，**绝对不要在此提交**；只在项目内独立仓库操作 |
+| 服务被沙箱回收 | nohup / 后台任务 / launchctl / setsid 活不过回合间隙 | 唯一有效：Python `subprocess.Popen(..., start_new_session=True)`（脱离进程组、被 init 收养）。`run_daemon.sh` 即此方式 |
+| B 站/ DashScope ProxyError | `ProxyError 127.0.0.1:59225 Connection refused` | 沙箱/系统代理端口动态变化且失效；`run_daemon.sh` 启动前 `unset` 所有代理变量强制直连（实测直连通） |
+| 批量进度页「每视频详情丢失」 | 以为回归 | 非 bug：单视频任务 `kind=job, children=0` 本不列；批量 `children` 正常（实测 2 集返回每集标题/状态/进度） |
 
-### 4.4 前端
-
+### 6.4 后端
 | 坑 | 现象 | 解决 |
 |---|---|---|
-| **`esc()` 类型 bug → 整批查看空白** | 弹窗打开但完全空白 | `esc(s)` 原实现 `(s\|\|"").replace(...)`；后端 `ep_no` 是**数字**（`1`），数字没有 `.replace` → TypeError → `paint()` 首行崩溃 → 容器从未赋值。改为 `(s==null?"":String(s)).replace(...)` |
-| **轮询覆盖详情页 → 点「查看」整页消失** | 部分完成时点查看，页面没了 | `poll()` 每 1.5s 调 `renderBatch()` 会隐藏 `#result`、重显批量列表。加 `viewingDetail` 守卫：查看中只更新缓存/进度，不重载列表；返回时置 false（否则轮询死冻） |
-| **旧 `render()` 先隐藏后填充** | 任一异常即留白 | 改为**先构建全部内容，成功后才 `display=block`**，异常只弹错误不隐藏页面 |
-| **弹窗一滑就消失** | 整批查看弹窗滚动即关 | 原因是点击背景（`.ovMask`）即关闭，滚动手势易误触发 → 已**删除弹窗**，改为渲染到页面内 `#batchView` |
-| Safari 修改不生效 | 反复报旧问题 | Safari 缓存旧 HTML。已在 FastAPI 加全局 `no-store` 中间件 + `<head>` 三个 no-cache meta；用户需硬刷新一次（Cmd+Shift+R） |
-| 勾选计数不生效 | 选 3 个仍显示 0 或全部 | 缺 `change` 事件委托，只在全选/反选时更新。加 `#sellist` 的 `change` 委托 |
-| Safari 兼容 | — | 去掉 `backdrop-filter`（Safari 合成透明 bug）；去掉 `Promise.allSettled`（老 Safari <13.1 不支持）改 `forEach` + async IIFE + `.catch` |
+| 中文文件名导出全 500 | txt/srt/md/json 全 Internal Error | starlette 按 latin-1 编码 header，中文进 `Content-Disposition` 抛 `UnicodeEncodeError` → RFC 5987 `filename*=UTF-8''` |
+| 批量导出文件名带上层名 | 文件名是主标题而非分集名 | `run_pipeline` 加 `ep_title`，批量 `_run_child` 传分集自身 part 名 |
+| DashScope `403 AllocationQuota` | 语音识别提交失败 | 非 bug：该 Key 未开通 ASR 配额（LLM 能调 ≠ ASR 已开通）。已多模型自动回退 |
+| B 站字幕取不到 | 有字幕也走 ASR | 部分字幕需登录 Cookie（页面可填 `bili_cookie`）；yt-dlp 反爬也回退 ASR |
+| ASR 音频解码失败 `DECODE_ERROR` | 早期「公网路由 + file_urls 回拉」带鉴权域名返回 401 HTML 被当音频 | 改为上传 OSS（`oss://` + `X-DashScope-OssResourceResolve: enable`） |
+| LLM 返回非常规结构导出 500 | tech/bilingual 字段是 dict/list | `_section_blocks` 全量 `str()` 兜底，openpyxl/reportlab 单元格绝不写非字符串 |
+| 模型面板被 CSS 隐藏（2026-08-30 修） | 新建解析页完全看不到三个下拉框 | `.selpanel{display:none}`，而模型面板用了该类且 JS 只控制批量面板；加 `id="modelPanel"` + `display:block` 覆盖 |
 
-### 4.5 测试方法（很值得复用）
+### 6.5 前端
+| 坑 | 现象 | 解决 |
+|---|---|---|
+| `esc()` 类型 bug → 整批查看空白 | 弹窗空白 | `esc(s)` 原 `(s\|\|"").replace`；`ep_no` 是数字无 `.replace` → TypeError。改为 `(s==null?"":String(s)).replace` |
+| 轮询覆盖详情页 | 点查看整页消失 | `poll()` 每 1.5s 调 `renderBatch()` 隐藏 `#result`；加 `viewingDetail` 守卫，返回时复位 |
+| 旧 `render()` 先隐藏后填充 | 任一异常即留白 | 改为先构建全部内容、成功后才 `display=block` |
+| 弹窗一滑就消失 | 滚动即关 | 删除弹窗，改为渲染到页面内 `#batchView` |
+| Safari 旧版不生效 | 反复报旧问题 | 加全局 `no-store` + `<head>` 三 no-cache meta；用户需硬刷新一次（Cmd+Shift+R） |
+| 勾选计数不生效 | 选 3 个仍显示 0 | 缺 `change` 事件委托；加 `#sellist` 的 `change` 委托 |
+| Safari 兼容 | — | 去掉 `backdrop-filter`；去掉 `Promise.allSettled` 改 `forEach`+async IIFE+`.catch` |
 
-- **VM/DOM 模拟 harness 必须用真实后端返回结构**。之前所有 harness 都用字符串 `ep_no:"P1"`，掩盖了数字类型导致的 TypeError；换成线上真实数据（`ep_no:1`）才暴露。
-- 自建 document 桩时，**必须注入浏览器全局**：`AbortController`、`clearTimeout`、`setInterval`、`localStorage`、`fetch`、`URL.createObjectURL`，否则 `finally{clearTimeout}` 抛 ReferenceError 造成**假失败**。
-- 本机无法 `pip install` 大包（OOM）时，用 faithful stub 仿真 openpyxl/reportlab API 离线验证，并用 `py_compile` + `node --check` 兜底语法。
-- 修改前端后，可用 `curl -s <域名>/ | grep -c '关键字'` 确认线上已生效（而非只信部署日志）。
+### 6.6 测试方法论（值得复用）
+- VM/DOM harness 必须用**真实后端返回结构**（`ep_no:1` 数字类型），字符串桩会掩盖 TypeError。
+- 自建 document 桩须注入浏览器全局：`AbortController`/`clearTimeout`/`setInterval`/`localStorage`/`fetch`/`URL.createObjectURL`，否则 `finally{clearTimeout}` 抛 ReferenceError 造成假失败。
+- 本机无法 `pip install` 大包（OOM）时用 faithful stub 仿真 openpyxl/reportlab 离线验证 + `py_compile`/`node --check` 兜底。
+- 改前端后 `curl -s <域名>/ | grep -c '关键字'` 确认线上已生效（而非只信部署日志）。
 
 ---
 
-## 5. 当前已知限制
-
-1. **多副本状态未根治**：`MemoryBackend` 只在单副本可靠；当前靠前端缓存 + `alwaysScale` 绕过。
-2. **ASR 配额按模型独立开通**（2026-08-29 本地实测更新）：当前 Key 下 **`fun-asr` 已可用**，`paraformer-v2` 未开通（提交即 403 AllocationQuota）。因已实现多模型自动回退，**无字幕视频现可正常走 `fun-asr` 转写**，无需额外操作。仅当 `fun-asr` 额度吃紧时，才需到百炼模型广场再开通 `qwen3-asr-flash-filetrans`（每月各赠 36000 秒）作回退备选。
-3. **EdgeOne 版不含批量**：云函数超时跑不了长任务。要在 EdgeOne 支持批量需改为「每集单独云函数调用 + KV 任务存储」，属较大改动。
+## 7. 当前已知限制
+1. **多副本状态未根治**：`MemoryBackend` 仅单副本可靠；当前靠前端缓存 + 最小实例数绕过。
+2. **ASR 配额按模型独立开通**：`fun-asr` 系列已可用；`paraformer-v2` 未开通（提交即 403），靠多模型回退绕过。仅 `fun-asr` 额度吃紧时才需再开通其他模型。
+3. **静音切除后时间戳偏移**：基于压缩时间轴，与原视频位置略有偏移（内容正确）。
 4. **B 站部分字幕需登录 Cookie**，否则回退 ASR（更慢、耗配额）。
 5. **自定义域名**：`*.sh.run.tcloudbase.com` 可用；绑自定义域名中国区需 ICP 备案。
-6. **无用户体系/持久化**：刷新后历史批次不可恢复（已主动移除历史批次入口）；任务结果不落库。
+6. **无用户体系/持久化**：刷新后历史批次不可恢复；任务结果不落库（仅 localStorage）。
+7. **线上部署严重落后于代码**（见 §0）——这是当前最紧迫的不一致。
 
 ---
 
-## 6. 继续前进的方向（按优先级）
+## 8. 后续开发方向（按优先级）
 
-### P0 —— 稳定性（建议先做，成本最低收益最高）
-1. **控制台把云托管「最小实例数」设为 1**，或更好：**建 TencentDB for Redis 并配 `REDIS_URL`**。
-   → 这是「多副本状态不一致」唯一的根治方案，能顺带解锁水平扩容。
-2. **轮换 DashScope API Key**：该 Key 曾在会话中明文出现，建议到 DashScope 控制台轮换。
-3. ~~**开通 ASR 模型配额**~~ → **已闭环（2026-08-29 实测）**：`fun-asr` 配额已可用，多模型回退在真实环境验证生效——日志可见「paraformer-v2 无配额，尝试下一模型 → DashScope 语音识别(fun-asr)中」。无字幕视频现已能正常转写，`paraformer-v2` 未开通也不影响。仅在 `fun-asr` 额度吃紧时才需再开通其他模型。
+### P0 —— 稳定性（成本最低收益最高）
+1. **重新部署 CloudBase**（见 §2.2），让线上与 `ec04855` 一致——补齐下拉框、ASR 提速、CSS 修复。
+2. **控制台把云托管「最小实例数」设为 1**，或更好：建 TencentDB for Redis 配 `REDIS_URL`，根治多副本状态不一致并解锁水平扩容。
+3. **轮换 DashScope API Key**（曾在会话中明文出现）。
 
 ### P1 —— 功能补全
-4. **任务结果持久化**：落 Redis / COS，支持刷新后恢复、断点续跑、跨设备查看。
-5. **B 站 Cookie 引导**：在页面上对「字幕提取失败将回退 ASR」给出前置提示与 Cookie 填写引导，减少无谓的 ASR 配额消耗。
-6. **长文阅读继续优化**：当前阅读栏 860px 居中、sticky 标题；可考虑分段折叠 / 目录导航 / 字号调节。
-7. **批量体验**：批量任务的暂停/重试、失败集一键重跑、整体进度预估。
+4. **任务结果持久化**：落 Redis / COS，支持刷新恢复、断点续跑、跨设备查看。
+5. **B 站 Cookie 引导**：对「字幕提取失败将回退 ASR」给前置提示与填写引导，减少无谓配额消耗。
+6. **长文阅读优化**：分段折叠 / 目录导航 / 字号调节。
+7. **批量体验**：暂停/重试、失败集一键重跑、整体进度预估。
 
 ### P2 —— 产品化
-8. **用户体系 + 配额计费**：当前仅按 IP 限流（20/小时），无法按用户计量与限流。
-9. **异步通知**：批量任务耗时长（25 集需数十分钟），可加完成回调 / 邮件通知（`/api/send` 与 SMTP 代码曾实现过，后按需求移除，可恢复）。
-10. **多平台扩展**：当前仅 B 站 + 本地上传；yt-dlp 本身支持 YouTube 等，接上即可。
+8. **用户体系 + 配额计费**：当前仅按 IP 限流（20/小时），无法按用户计量。
+9. **异步通知**：批量耗时数十分钟，可加完成回调/邮件。
+10. **多平台扩展**：当前仅 B 站 + 本地上传；yt-dlp 本身支持 YouTube 等。
 11. **自定义域名 + 备案**，摆脱 `*.sh.run.tcloudbase.com`。
 
 ---
 
-## 7. 可复用的经验沉淀
+## 9. 接收本项目必须知道的其它知识
 
-1. **前端缓存是无状态拓扑的通用解药**：把结果缓存在浏览器（`vsb_res_<id>`），即可让「查看/导出」完全不受多副本、缩容、实例重启影响。比改造后端状态存储便宜一个数量级。
-2. **防御式渲染三原则**：① 先构建内容、成功后再显示；② 逐条 try/catch，单条异常不影响整体；③ 工具函数（如 `esc`）对所有类型安全。三者结合可根治「整页空白」类问题。
-3. **轮询与详情视图必须互斥**：任何「定时刷新列表 + 可打开详情」的界面，都要有 `viewingDetail` 类守卫，且**返回时务必复位**，否则列表永久停止刷新。
-4. **排查「修改不生效」先怀疑浏览器缓存**：线上 md5 与本地一致 + 后端已生效，但仍复现 → 加 `no-store` 并要求硬刷新。
-5. **区分「配额/权限」与「代码 bug」**：上传凭证能申请成功 = Key 有效；具体模型调用 403 = 未开通该模型配额。独立配额（LLM vs ASR）是高频误判点。
-6. **写 harness 必须用真实数据结构**，尤其注意字段类型（数字 vs 字符串），否则测试会系统性掩盖运行时错误。
-7. **CloudBase CLI 速查**：登录 `cloudbase login --cloudbase-api-key <Key> -e <envId>`；部署 `printf '\n' | cloudbase cloudrun deploy --source . -s <服务名> --port <端口> -e <envId> --wait --force`。注意 `--port` 不是 `-p`，非交互必须喂回车。
+- **账号与密钥**：DashScope（阿里云百炼）账号提供 `DASHSCOPE_API_KEY`，ASR 与 LLM 是**独立配额**，开通模型要分别确认。CloudBase 环境 `dev-d2gldfbb91a93f3e6`（腾讯云）。GitHub 私有库 `liupu1106/video-subtitle-agent-server`。
+- **模型分层概念**：ASR 语音模型（`REALTIME_ASR_MODELS`，fun-asr 系列，走实时 WebSocket）与 LLM 文本模型（`LLM_MODELS`，qwen-plus 系列，做梳理/翻译）**完全分离**，各自支持「env 优先级覆盖 + 运行时自动回退」。调模型前先想清是语音还是文本。
+- **快到期优先策略**：权益页模型有有效期，把将过期的写进 `ASR_MODEL_PRIORITY` / `LLM_MODEL_PRIORITY` 即可省钱，无需改代码。
+- **不要碰 `/Users/liupu/.git`**：那是误 init 的 home 仓库，任何提交都会泄露私钥/个人文件。只在项目内仓库工作。
+- **沙箱网络三定律**：① 推 GitHub 走 SSH 部署密钥；② 后端直连外网、严禁代理；③ 服务保活用 `start_new_session=True`，别用 nohup/launchctl。
+- **验证链路**：B 站具体视频 `view` 接口可用；排行榜/搜索被风控（返回 `-352`/412），填 Cookie 绕过。`/api/resolve` 对失效 BV 号返回 `error:'data'`（`KeyError`）是链接无效非故障。
 
 ---
 
-## 附：常用验证命令
+## 附：常用命令
 
 ```bash
-# 健康检查
+# 健康检查（看 Key 是否生效）
+curl -s http://127.0.0.1:8000/api/health
+# 线上（旧部署，仅供对照）：
 curl -s https://video-subtitle-304233-9-1475154132.sh.run.tcloudbase.com/api/health
 
-# 探测链接（应返回 25 个分P）
-curl -s "https://video-subtitle-304233-9-1475154132.sh.run.tcloudbase.com/api/resolve?url=BV1PM8y6rEE3?p=16"
+# 可用模型列表（下拉框数据源）
+curl -s http://127.0.0.1:8000/api/models
 
-# 确认线上前端已含最新改动
-curl -s https://video-subtitle-304233-9-1475154132.sh.run.tcloudbase.com/ | grep -c 'batchView\|rawseg'
+# 探测链接（应返回分P 列表）
+curl -s "http://127.0.0.1:8000/api/resolve?url=BV1PM8y6rEE3?p=16"
+
+# 确认线上前端已含最新改动（下拉框 id）
+curl -s https://video-subtitle-304233-9-1475154132.sh.run.tcloudbase.com/ | grep -c 'asrModel'   # 应为 0（旧部署）
 
 # 本地语法兜底
 python -m py_compile app/*.py
-node --check <(提取 static/index.html 内联脚本)
+node --check static/js/app.js   # 需抽出内联脚本时用等价检查
+
+# 本地提交并推送（沙箱用 SSH 部署密钥）
+git add -A && git commit -m "..." && \
+  GIT_SSH_COMMAND="ssh -i .ssh_deploy/id_ed25519 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no" \
+  git push -u origin master
 ```
 
 测试视频：`BV1PM8y6rEE3`（25 个分P），选 `[0,1]` 约 30s 完成，适合快速回归。

@@ -408,11 +408,31 @@ def download_audio_to(url, dst_wav, max_sec=7200, cookie=None):
                 if chunk:
                     f.write(chunk)
     if _sh.which("ffmpeg"):
-        cmd = (f'ffmpeg -y -i "{tmp}" -ar 16000 -ac 1 -c:a pcm_s16le '
-               f'-t {max_sec} "{dst_wav}" -loglevel error')
-        os.system(cmd)
-        if dst_wav.exists() and dst_wav.stat().st_size > 0:
-            return dst_wav
+        # 合并「抽取音频+静音切除+解码为 PCM」为单次 ffmpeg，直接产 .pcm 供实时 ASR，
+        # 省掉原流程里 转 wav → 静音切除 → 再解码 PCM 的两次串行 ffmpeg 开销
+        import subprocess
+        dst_pcm = dst_wav.with_suffix(".pcm")
+        do_silence = os.environ.get("ASR_SILENCE_REMOVE", "1") not in ("0", "false", "no")
+        af = ""
+        if do_silence:
+            af = ("silenceremove=start_periods=1:stop_periods=-1:"
+                  "start_duration=0.3:stop_duration=0.5:"
+                  "start_threshold=-35dB:stop_threshold=-35dB")
+        cmd = ["ffmpeg", "-y", "-i", str(tmp)]
+        if af:
+            cmd += ["-af", af]
+        cmd += ["-ar", "16000", "-ac", "1", "-f", "s16le", "-loglevel", "error"]
+        # 仅当 max_sec 为有效正数时追加时长裁剪；否则 ffmpeg 收到 "-t None/0" 会失败，
+        # 导致预处理静默回退为「未处理原文件」（吃掉静音切除+转码提速）。
+        if max_sec and float(max_sec) > 0:
+            cmd += ["-t", str(int(float(max_sec)))]
+        cmd += [str(dst_pcm)]
+        try:
+            p = subprocess.run(cmd, capture_output=True, timeout=600)
+            if p.returncode == 0 and dst_pcm.exists() and dst_pcm.stat().st_size > 0:
+                return dst_pcm
+        except Exception:
+            pass
     # 无 ffmpeg：直接用 m4a（AAC），识别服务支持该格式；
     # 不能改名成 .wav，否则会按 wav 解码 AAC 数据而报 DECODE_ERROR
     return tmp
