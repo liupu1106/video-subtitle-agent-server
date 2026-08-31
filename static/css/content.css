@@ -158,6 +158,9 @@
 
 /* ---------- 理解视图（梳理区一键生成，Mermaid 渲染）---------- */
 .vizbar{margin:12px 0 0}
+.vizbar .vizdl{margin-left:6px;background:#16203a;border-color:#2a3860;color:#cfe0ff}
+.vizbar .vizdl:hover{border-color:var(--brand);color:#fff}
+.vizsep{color:var(--line);margin:0 6px}
 .vizbox{margin-top:14px;background:#0a0d1a;border:1px solid var(--line);border-radius:14px;padding:20px 24px;max-width:880px;margin-left:auto;margin-right:auto}
 .vizhead{font-size:15px;font-weight:600;color:#fff;margin-bottom:6px}
 .viztype{color:var(--brand);font-size:12px;font-weight:400;margin-left:6px;opacity:.9}

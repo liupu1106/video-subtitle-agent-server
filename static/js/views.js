@@ -39,6 +39,7 @@ function render(res){
       const gv = $("genVizBtn"); if(gv){ gv.disabled = false; gv.textContent = "📊 生成理解视图"; }
       const hv = $("hideVizBtn"); if(hv){ hv.style.display = "none"; hv.textContent = "🙈 隐藏视图"; }
       const vh = $("vizHint"); if(vh){ vh.style.display = ""; }
+      hideVizExports();
     })();
 
     // 2) 原始字幕（分段、带序号，易读）
@@ -77,6 +78,9 @@ function render(res){
       if(show && currentViz && !b.querySelector(".vizsvg") && !b.querySelector(".vizerr") && !b.querySelector(".vizloading"))
         renderSummaryViz(currentViz);
     };
+    const vp = $("vizPngBtn"); if(vp) vp.onclick = ()=>downloadViz("png");
+    const vs = $("vizSvgBtn"); if(vs) vs.onclick = ()=>downloadViz("svg");
+    const vm = $("vizMmdBtn"); if(vm) vm.onclick = ()=>downloadViz("mmd");
   }catch(e){
     // 任一处渲染异常都不应让整页变空白：原样展示报错并保留批量列表入口
     showErr("结果渲染失败：" + (e && e.message ? e.message : e) + "（结果数据可能不完整，建议重新解析该视频）");
@@ -197,6 +201,7 @@ function generateSummaryViz(){
   // 缺 Key 时由后端返回 400 并提示，避免「已配 Key 却误报未填」。
   btn.disabled = true; btn.textContent = "⏳ 生成中…";
   hint.style.display = "none";
+  hideVizExports();
   box.style.display = "block";
   box.innerHTML = '<div class="vizloading">🧠 正在根据内容生成最适合的理解视图…</div>';
   const payload = { text: md, title: (currentResult && currentResult.title) || "", api_key: apiKey };
@@ -208,6 +213,7 @@ function generateSummaryViz(){
       renderSummaryViz(d);
       btn.disabled = false; btn.textContent = "🔄 重新生成视图";
       $("hideVizBtn").style.display = "";
+      showVizExports();
     })
     .catch(err=>{
       btn.disabled = false; btn.textContent = "📊 生成理解视图";
@@ -242,6 +248,72 @@ function renderSummaryViz(d){
       box.innerHTML = '<div class="vizerr">⚠️ 图表渲染异常：' + esc(String(e)) + '</div><pre class="vizraw">' + esc(d.mermaid || "") + '</pre>';
     }
   });
+}
+
+/* 生成成功后显示导出按钮（PNG / SVG / Mermaid源）；隐藏视图时按钮保留 */
+function showVizExports(){
+  ["vizDlSep","vizPngBtn","vizSvgBtn","vizMmdBtn"].forEach(id=>{
+    const el = $(id); if(el) el.style.display = "";
+  });
+}
+function hideVizExports(){
+  ["vizDlSep","vizPngBtn","vizSvgBtn","vizMmdBtn"].forEach(id=>{
+    const el = $(id); if(el) el.style.display = "none";
+  });
+}
+
+/* 一键导出视图：kind ∈ png | svg | mmd；纯前端实现，无需后端 */
+function downloadViz(kind){
+  const box = $("summaryViz");
+  const svgEl = box ? box.querySelector(".vizsvg svg") : null;
+  const safeTitle = ((currentResult && currentResult.title) || currentViz && currentViz.title || "理解视图")
+    .replace(/[\\/:*?"<>|\n\r]+/g, "_").slice(0, 40);
+  const typeTag = currentViz && currentViz.type ? currentViz.type : "viz";
+  const base = safeTitle + "-理解视图-" + typeTag;
+  if(kind === "mmd"){
+    if(!currentViz || !currentViz.mermaid){ alert("尚无可下载的视图（请先生成理解视图）"); return; }
+    triggerDownloadBlob(new Blob([currentViz.mermaid], {type:"text/plain;charset=utf-8"}), base + ".mmd");
+    return;
+  }
+  // png / svg 都需要渲染出的 <svg>
+  if(!svgEl){ alert("当前视图为降级文本（图表库未加载或 Mermaid 语法有误），无法导出图片；可下载「Mermaid源」后用 Mermaid Live Editor 打开。"); return; }
+  const xml = new XMLSerializer().serializeToString(svgEl);
+  if(kind === "svg"){
+    const out = '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n' + xml;
+    triggerDownloadBlob(new Blob([out], {type:"image/svg+xml;charset=utf-8"}), base + ".svg");
+    return;
+  }
+  // png：SVG -> Blob -> Image -> Canvas(白底, 2x) -> toBlob
+  const svgBlob = new Blob([xml], {type:"image/svg+xml;charset=utf-8"});
+  const url = URL.createObjectURL(svgBlob);
+  const img = new Image();
+  img.onload = function(){
+    const vb = svgEl.viewBox && svgEl.viewBox.baseVal;
+    const w = vb && vb.width ? vb.width : (svgEl.width && svgEl.width.baseVal && svgEl.width.baseVal.value) || svgEl.clientWidth || 800;
+    const h = vb && vb.height ? vb.height : (svgEl.height && svgEl.height.baseVal && svgEl.height.baseVal.value) || svgEl.clientHeight || 600;
+    const scale = 2;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(w*scale); canvas.height = Math.round(h*scale);
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ffffff"; ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.scale(scale, scale);
+    ctx.drawImage(img, 0, 0, w, h);
+    URL.revokeObjectURL(url);
+    canvas.toBlob(function(b){
+      if(!b){ alert("PNG 导出失败，可改下载 SVG 或 Mermaid源"); return; }
+      triggerDownloadBlob(b, base + ".png");
+    }, "image/png");
+  };
+  img.onerror = function(){ URL.revokeObjectURL(url); alert("PNG 导出失败，可改下载 SVG 或 Mermaid源"); };
+  img.src = url;
+}
+
+function triggerDownloadBlob(blob, filename){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 4000);
 }
 
 function showPane(tab){
