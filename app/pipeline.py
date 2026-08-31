@@ -285,11 +285,9 @@ def detect_lang(text):
 
 def _llm_request(api_key, model, messages, response_format=None, max_tokens=2000):
     """单次调用通义千问 chat/completions，返回 content 字符串；非 200 抛错（供回退）。"""
-    body = {"model": model, "messages": messages, "temperature": 0.3}
+    body = {"model": model, "messages": messages, "temperature": 0.3, "max_tokens": max_tokens}
     if response_format:
         body["response_format"] = response_format
-    else:
-        body["max_tokens"] = max_tokens
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     r = requests.post(DASHSCOPE_URL, headers=headers, json=body, timeout=180)
     if r.status_code != 200:
