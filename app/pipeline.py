@@ -501,28 +501,46 @@ def _parse_dashscope_transcript(raw_text):
     return text.strip() or raw_text.strip()
 
 
-# 语音识别模型回退策略（2026-08-29 重构，详见 handover/对话记录）：
-# - 优先走「实时(WebSocket)接口」：用户控制台已开通的 fun-asr-mtl-realtime 等实时模型。
-#   它们无需公网可达的音频 URL（本地/容器内直接推 16k 单声道 PCM 流即可），各自独立配额；
-#   老的异步文件转录接口（paraformer-v2/fun-asr）免费额度已耗尽时，用实时模型即可继续。
-# - 仅在实时接口都不可用（未开通/配额耗尽）时，回退到老的异步文件转录接口。
-#   注意：控制台里 `*-realtime` 模型名不能直接用于文件转录接口，必须走实时 WebSocket；
-#   且控制台显示的 `qwen-audio-3.0-asr-flash`、`qwen3-asr-flash-realtime-*` 对应实时 API 的
-#   实际模型名为 `qwen-audio-3.0-asr-flash-streaming`、以及 `fun-asr-mtl-realtime` 等。
+# 语音识别模型清单（2026-09-01 按用户控制台「使用中/100%」清单重建）：
+# - 仅收录「实时(WebSocket)语音识别」模型；排除 TTS(cosyvoice / qwen-tts / qwen-voice)、
+#   音乐生成(fun-music) 与免费额度已用尽(0%) 的模型——后两者选了会让识别失败并触发回退。
+# - 模型名用「实时 WebSocket 真实模型名」：控制台显示的 qwen-audio-3.0-asr-flash 其可用
+#   实时名就是自身（注意别别名到已用尽的 -streaming 变体）；qwen3-asr-flash 的实时名为
+#   qwen3-asr-flash-realtime。fun-asr-mtl-realtime / fun-asr-flash-8k-realtime 本身已用尽，
+#   改用同系「使用中」的日期变体。
+# - 运行时任一模型不可用都会自动跳到下一个（见 dashscope_asr）；另经 DashScope 模型接口
+#   实时合并当前账号「可用」的全部模型（get_available_models），实现自由切换 + 逐模型降级。
 REALTIME_ASR_MODELS = [
     # —— 通义千问实时语音识别（推荐优先，覆盖中/英/多语种）——
-    "qwen3-asr-flash-realtime",            # 最新实时 ASR（控制台显示 qwen3-asr-flash-realtime）
-    "qwen-audio-3.0-asr-flash-streaming",  # 控制台显示名 qwen-audio-3.0-asr-flash
-    "qwen-audio-3.0-realtime-flash",
+    "qwen3-asr-flash-realtime",              # 最新旗舰实时 ASR（控制台 qwen3-asr-flash，实时名即此）
+    "qwen3-asr-flash-realtime-2025-10-27",
+    "qwen3-asr-flash-realtime-2026-02-10",
+    "qwen-audio-3.0-realtime-flash",         # 实时可用（剩余 41 天）
     "qwen-audio-3.0-realtime-plus",
-    "qwen3.5-omni-flash-realtime",          # omni 实时（含 ASR 能力）
-    "qwen3.5-omni-plus-realtime",
+    "qwen-audio-3.0-asr-flash",              # 控制台显示名即实时可用（剩余 56 天；注意不是已用尽的 -streaming）
+    "sensevoice-v1",                         # 多语种实时 ASR（永不过期）
     # —— Fun-ASR 系列（老牌多语种实时，控制台常显"使用中"）——
-    "fun-asr-mtl-realtime",                 # 多语种实时
-    "fun-asr-realtime",
-    "fun-asr-flash-8k-realtime",            # 8k 电话音质兜底
+    "fun-asr-mtl-realtime-2025-12-10",       # 多语种实时（fun-asr-mtl-realtime 已用尽，用此日期变体）
+    "fun-asr-realtime-2026-02-28",
+    "fun-asr-realtime-2025-09-15",
+    "fun-asr-realtime-2025-11-07",
+    "fun-asr-flash-2026-06-15",              # 实时（剩余 15 天）
+    "fun-asr-flash-8k-realtime-2026-01-28",  # 8k 电话音质兜底（fun-asr-flash-8k-realtime 已用尽，用此日期变体）
 ]
-ASR_FILE_MODELS = ["paraformer-v2", "fun-asr"]  # 老接口兜底（需 oss 直传）
+# 老接口兜底（异步文件转录，需 oss 直传）：当实时(WebSocket)接口在本环境不可用
+# （沙箱/代理拦截 wss、或账号实时模型均失败）时回退到这里。优先用用户控制台
+# 「使用中/100%」的 qwen3-asr-flash 系列文件转录模型（本账号实时模型失败时常能救场），
+# 老的 paraformer-v2/fun-asr 免费额度常已耗尽，仅作最后兜底。
+ASR_FILE_MODELS = [
+    "qwen3-asr-flash",                    # 旗舰文件转录（控制台 100% 可用）
+    "qwen3-asr-flash-filetrans",          # 明确文件转录模型
+    "qwen-audio-3.0-asr-flash-filetrans",
+    "qwen3-asr-flash-2026-02-10",
+    "qwen3-asr-flash-2025-11-17",
+    "qwen3-asr-flash-2025-09-08",
+    "paraformer-v2",                      # 老接口最后兜底（免费额度常已耗尽）
+    "fun-asr",
+]
 # 兼容旧部署：若显式设置 ASR_MODEL 环境变量，作为首选模型
 _ASR_MODEL_ENV = os.environ.get("ASR_MODEL", "").strip()
 
@@ -588,8 +606,9 @@ def _fetch_dashscope_models(api_key):
 
 
 # 控制台显示名 → 实时 WebSocket 实际模型名 的别名映射（接口返回的常是控制台别名）
+# 注意：qwen-audio-3.0-asr-flash 的可用实时名就是自身，其 -streaming 变体在本账号已用尽，
+# 故不再做该别名映射（避免了误跳到 0% 配额模型）。
 _ASR_ALIASES = {
-    "qwen-audio-3.0-asr-flash": "qwen-audio-3.0-asr-flash-streaming",
     "qwen3-asr-flash": "qwen3-asr-flash-realtime",
     "qwen3.5-omni-flash": "qwen3.5-omni-flash-realtime",
     "qwen3.5-omni-plus": "qwen3.5-omni-plus-realtime",
@@ -784,6 +803,7 @@ async def _realtime_ws(api_key, model, pcm, job_id):
         ping_interval=15,        # 客户端主动发 ping，保活服务端侧连接
         ping_timeout=20,
         close_timeout=10,
+        open_timeout=10,        # 连接 10s 内未建立即快速失败，避免 wss 被拦截时长时间挂起
     ) as ws:
         await ws.send(json.dumps({
             "header": {"action": "run-task", "task_id": tid, "streaming": "duplex"},
@@ -1035,35 +1055,39 @@ def dashscope_asr(wav_path, api_key, model=None, asr_model=None, fallback_model=
         rt_cands.append(fallback_model)
     rt_cands = list(dict.fromkeys(rt_cands))  # 去重保序
 
+    last_err = None
     for m in rt_cands:
         try:
             if job_id:
                 store.log(job_id, "语音转写", 52, f"DashScope 实时识别({m})中")
             return _realtime_asr(api_key, m, wav_path, job_id), "zh(识别)"
         except Exception as e:
+            last_err = e
             if job_id:
-                store.log(job_id, "语音转写", 56, f"{m} 不可用，尝试下一模型")
+                store.log(job_id, "语音转写", 56, f"{m} 实时识别失败：{str(e)[:200]}；尝试下一模型")
             continue
 
-    # 兜底：老的异步文件转录接口
+    # 兜底：老的异步文件转录接口（本环境实时 WS 不可用时，qwen3-asr-flash 等常能救场）
     for m in ASR_FILE_MODELS:
         try:
             if job_id:
                 store.log(job_id, "语音转写", 52, f"DashScope 文件转录({m})中")
             return _asr_try_model(wav_path, api_key, m, job_id), "zh(识别)"
         except Exception as e:
+            last_err = e
             if job_id:
-                store.log(job_id, "语音转写", 56, f"{m} 无配额，尝试下一模型")
+                store.log(job_id, "语音转写", 56, f"{m} 文件转录失败：{str(e)[:200]}；尝试下一模型")
             continue
 
     tried = "、".join(rt_cands + list(ASR_FILE_MODELS))
+    reason = f"最近一次错误：{last_err}" if last_err else "未知原因"
     raise RuntimeError(
-        "所有语音识别模型均尝试失败（已依次尝试 %d 个：%s）。"
-        "通常为该账号未开通实时语音识别模型或配额耗尽。请到阿里云百炼控制台开通实时语音识别模型"
-        "（fun-asr-mtl-realtime / qwen3-asr-flash-realtime 等每月赠送免费额度，需手动开通后才计入），开通页："
-        "https://bailian.console.aliyun.com/#/model-market 。"
-        "若仍想用老的 paraformer-v2/fun-asr，请在其免费额度耗尽后在控制台开通或付费。"
-        % (len(rt_cands) + len(ASR_FILE_MODELS), tried))
+        "所有语音识别模型均尝试失败（已依次尝试 %d 个：%s）。%s。"
+        "通常原因：①本环境无法建立到 DashScope 的实时 WebSocket(wss) 连接"
+        "（沙箱/代理常拦截 wss，此时已自动回退到文件转录模型）；②该账号实时模型均未开通/配额耗尽；"
+        "③模型名不被实时接口接受。若文件转录也失败，请到阿里云百炼控制台确认模型已开通："
+        "https://bailian.console.aliyun.com/#/model-market"
+        % (len(rt_cands) + len(ASR_FILE_MODELS), tried, reason))
 
 
 def do_asr(wav_path, api_key, job_id, asr_model=None, fallback_model=None):
