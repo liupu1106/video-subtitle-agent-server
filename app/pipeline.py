@@ -281,7 +281,19 @@ def _llm_request(api_key, model, messages, response_format=None, max_tokens=2000
     if response_format:
         body["response_format"] = response_format
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    r = requests.post(DASHSCOPE_URL, headers=headers, json=body, timeout=180)
+    last = None
+    for _attempt in range(3):
+        try:
+            r = requests.post(DASHSCOPE_URL, headers=headers, json=body, timeout=90)
+            break
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last = e
+            if _attempt < 2:
+                time.sleep(2 * (_attempt + 1))
+                continue
+            raise RuntimeError(f"llm {model} 请求超时（网关/网络过慢）：{e}")
+    else:
+        raise RuntimeError(f"llm {model} 请求失败：{last}")
     if r.status_code != 200:
         raise RuntimeError(f"llm {model} {r.status_code}: {r.text[:300]}")
     try:
@@ -297,19 +309,24 @@ def _llm_request(api_key, model, messages, response_format=None, max_tokens=2000
     return str(content).strip()
 
 
-def llm_with_fallback(api_key, messages, response_format=None, max_tokens=2000, preferred=None, fallback=None):
+def llm_with_fallback(api_key, messages, response_format=None, max_tokens=2000, preferred=None, fallback=None, max_try=None):
     """遍历 LLM_MODELS（preferred 排最前，fallback 置于末尾），任一模型「额度耗尽/未开通/过期」自动跳下一个。
 
     用于「AI 校验与梳理」步骤消耗文本模型额度；配合 .env 的 LLM_MODEL_PRIORITY
     可把快到期的模型排前面优先消耗。fallback 为前端指定的统一替代模型。"""
-    cands = list(LLM_MODELS)
-    if preferred:
+    cands = list(LLM_FALLBACK)
+    if preferred and preferred not in cands:
         cands = [preferred] + cands
     if fallback and fallback not in cands:
         cands.append(fallback)
     cands = list(dict.fromkeys(cands))  # 去重保序
+    max_try = max_try or 6
     last_err = None
+    tried = 0
     for m in cands:
+        if tried >= max_try:
+            break
+        tried += 1
         try:
             return _llm_request(api_key, m, messages, response_format=response_format, max_tokens=max_tokens)
         except Exception as e:
@@ -589,13 +606,19 @@ if _priority_env:
 # 当前账号"可用"的全部模型（见 get_available_models），实现自由切换 + 逐模型降级。
 LLM_MODELS = [
     # 最新 qwen3.x 主力（文本梳理/翻译首选）
-    "qwen3.5-plus", "qwen3.6-plus", "qwen3.7-plus",
+    "qwen3.5-plus", "qwen3.6-plus",
     "qwen3.7-max", "qwen3.6-max-preview", "qwen3-max", "qwen-max", "qwen-max-latest",
     "qwen3.5-flash", "qwen3.6-flash", "qwen3.7-flash", "qwen-flash",
     "qwen-plus", "qwen-plus-latest", "qwen-long", "qwen-turbo",
     # 更新代际（若已开通）
     "qwen3.8-flash", "qwen3.8-max", "qwen3.8-27b",
-    "qwen3-next-80b-a3b-instruct", "qwen3-coder-plus",
+    "qwen3-next-80b-a3b-instruct", "qwen3-coder-plus", "qwen3.7-plus",
+]
+# 自动降级只用少量稳定模型：实时发现会把几十个模型并入 LLM_MODELS，逐一超时拖垮解析。
+# 下拉框仍展示 LLM_MODELS 全量（含实时发现）满足手动自由切换；自动 fallback 仅用以下：
+LLM_FALLBACK = [
+    "qwen-plus", "qwen-max", "qwen-turbo", "qwen-long",
+    "qwen3.5-plus", "qwen3.6-plus",
 ]
 _llm_priority_env = os.environ.get("LLM_MODEL_PRIORITY", "").strip()
 if _llm_priority_env:
