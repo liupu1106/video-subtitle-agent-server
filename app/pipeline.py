@@ -318,6 +318,32 @@ def llm_with_fallback(api_key, messages, response_format=None, max_tokens=2000, 
     raise last_err or RuntimeError("所有 LLM 模型均不可用")
 
 
+def _safe_json(resp, ctx="DashScope"):
+    """容错解析 JSON 响应：空 body / 非 JSON 网关页都抛明确错误（而非原生
+    'Expecting value: line 1 column 1'），便于上层触发模型回退；含 HTTP 状态与 body 片段。"""
+    text = (getattr(resp, "text", "") or "").strip()
+    if not text:
+        raise RuntimeError(f"{ctx} 返回空响应（HTTP {resp.status_code}，疑似网关/代理瞬时错误，可重试）")
+    try:
+        return resp.json()
+    except Exception:
+        raise RuntimeError(f"{ctx} 返回非 JSON（HTTP {resp.status_code}，疑似网关/代理错误页）：{text[:200]}")
+
+
+def _http_json(method, url, ctx, headers=None, json=None, retries=2, timeout=60):
+    """带重试的 JSON 请求：空响应/网络错误自动重试，缓解 DashScope 在本环境偶发空 body。"""
+    last = None
+    for i in range(retries + 1):
+        try:
+            resp = requests.request(method, url, headers=headers, json=json, timeout=timeout)
+            return _safe_json(resp, ctx)
+        except Exception as e:
+            last = e
+            if i < retries:
+                time.sleep(2)
+    raise last
+
+
 def _parse_json_or_none(content):
     """容错解析 LLM 返回的 JSON（可能带 markdown 代码块或多余文本）。"""
     try:
@@ -691,7 +717,7 @@ def _dashscope_upload(api_key, model, file_path):
         if r.status_code == 403 and "AllocationQuota" in r.text:
             raise _AsrModelUnavailable(f"模型 {model} 未开通上传配额")
         raise RuntimeError(f"获取音频上传凭证失败 {r.status_code}: {r.text[:300]}")
-    d = r.json()["data"]
+    d = _safe_json(r, "获取上传凭证")["data"]
     size_mb = file_path.stat().st_size / 1048576.0
     limit = float(d.get("max_file_size_mb") or 100)
     if size_mb > limit:
@@ -734,19 +760,32 @@ def _asr_try_model(wav_path, api_key, model, job_id):
                "X-DashScope-Async": "enable",
                "X-DashScope-OssResourceResolve": "enable"}
     body = {"model": model, "input": {"file_urls": [audio_url]}}
-    r = requests.post(url, headers=headers, json=body, timeout=180)
-    if r.status_code != 200:
-        if r.status_code == 403 and "AllocationQuota" in r.text:
-            raise _AsrModelUnavailable(f"模型 {model} 未开通转写配额")
-        raise RuntimeError(f"DashScope 语音识别提交失败 {r.status_code}: {r.text[:300]}")
-    out = r.json().get("output", {})
+    out = None
+    for _attempt in range(3):
+        try:
+            resp = requests.post(url, headers=headers, json=body, timeout=180)
+            if resp.status_code != 200:
+                if resp.status_code == 403 and "AllocationQuota" in resp.text:
+                    raise _AsrModelUnavailable(f"模型 {model} 未开通转写配额")
+                raise RuntimeError(f"DashScope 语音识别提交失败 {resp.status_code}: {resp.text[:300]}")
+            out = _safe_json(resp, f"提交识别({model})").get("output", {})
+            break
+        except (_AsrModelUnavailable,):
+            raise
+        except Exception:
+            if _attempt < 2:
+                time.sleep(2)
+                continue
+            raise
+    if out is None:
+        raise RuntimeError(f"提交识别({model}) 重试后仍失败")
     task_id = out.get("task_id")
     if not task_id:
         raise RuntimeError("DashScope 语音识别未返回 task_id: " + str(r.text[:300]))
     get_url = f"https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
     for _ in range(180):
         time.sleep(2)
-        g = requests.get(get_url, headers=headers, timeout=30).json()
+        g = _http_json("get", get_url, f"轮询任务({model})", headers=headers, retries=2, timeout=30)
         st = g.get("output", {}).get("task_status")
         if st == "SUCCEEDED":
             res = g.get("output", {}).get("results", [{}])[0]
